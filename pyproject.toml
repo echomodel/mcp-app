@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-app"
+version = "0.1.0"
+description = "Config-driven MCP application framework with auth, middleware, and data stores"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]",
+    "pyjwt>=2.0",
+    "pydantic>=2.0",
+    "starlette>=0.27",
+    "uvicorn>=0.20",
+    "pyyaml>=6.0",
+    "click>=8.0",
+]
+
+[project.scripts]
+mcp-app = "mcp_app.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]
