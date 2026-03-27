@@ -1,4 +1,6 @@
-"""mcp-app CLI — stdio and serve commands."""
+"""mcp-app CLI — serve command."""
+
+from pathlib import Path
 
 import click
 
@@ -10,32 +12,21 @@ def main():
 
 
 @main.command()
-def stdio():
-    """Run MCP server over stdio (local, single user)."""
-    from mcp_app.bootstrap import load_config, build_mcp, build_store
-
-    config = load_config()
-    store = build_store(config)
-
-    # Make store available to tools via module-level import
-    import mcp_app
-    mcp_app._store = store
-
-    mcp = build_mcp(config)
-    mcp.run()
-
-
-@main.command()
+@click.argument("app_path", required=False, default=None)
 @click.option("--host", default="0.0.0.0")
 @click.option("--port", default=8080, type=int)
-def serve(host, port):
-    """Run MCP server over HTTP (production, multi-user)."""
+def serve(app_path, host, port):
+    """Run MCP server over HTTP (production, multi-user).
+
+    APP_PATH: Optional path to the directory containing mcp-app.yaml.
+    Defaults to the current working directory.
+    """
     import uvicorn
     from mcp_app.bootstrap import build_app
 
-    app, mcp, store, config = build_app()
+    config_path = Path(app_path) / "mcp-app.yaml" if app_path else None
+    app, mcp, store, config = build_app(config_path)
 
-    # Make store available to tools via module-level import
     import mcp_app
     mcp_app._store = store
 
