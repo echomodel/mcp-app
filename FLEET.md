@@ -163,3 +163,180 @@ mcp-app users add       ← mcp-app (knows the admin API, provider resolves sign
 ```
 
 mcp-app owns everything except the one cloud-specific step in the middle. That step is delegated to a pip-installable provider that anyone can publish.
+
+## Ecosystem Example
+
+Jim runs a small company. He uses mcp-app services from multiple sources,
+deployed across different platforms. Here's his full setup.
+
+### Jim's solution repos
+
+Jim wrote one app himself. The others are open source or third-party:
+
+```yaml
+# jim/sales-tools/mcp-app.yaml — Jim's own app
+name: sales-tools
+tools: sales_tools.mcp.tools
+store: filesystem
+middleware:
+  - user-identity
+```
+
+He also uses `echomodel/echofit` (open source) and a commercial MCP service
+from Acme Corp that publishes a pre-built image.
+
+### Jim's fleet repo
+
+```yaml
+# jim/my-fleet/fleet.yaml
+
+# Default provider for most things
+provider: cloudrun
+provider_config:
+  project: jim-prod
+  region: us-central1
+
+solutions:
+
+  # Jim's own app — GitHub repo, build from source
+  sales-tools:
+    source: jim/sales-tools
+
+  # Open source app — different org, same provider
+  echofit:
+    source: echomodel/echofit
+
+  # Commercial app — pre-built image, no build step
+  acme-crm:
+    source: ghcr.io/acmecorp/crm-mcp:v3.1
+
+  # Jim's experimental app — runs on HackerHost instead of Cloud Run
+  experiments:
+    source: jim/mcp-experiments
+    provider: hackerhost
+    provider_config:
+      api_key_secret: jim-hh-key
+      region: eu-west
+
+  # Local dev instance — runs in Docker on Jim's machine
+  sales-tools-dev:
+    source: ./sales-tools-local
+    provider: local-docker
+    provider_config:
+      port: 9090
+
+  # Third-party service Jim doesn't manage — just tracks the URL
+  partner-api:
+    source: ghcr.io/partner/their-service:latest
+    managed: false
+```
+
+Six solutions. Three source types (GitHub repos, container images, local path).
+Three providers (Cloud Run, HackerHost, local Docker). One fleet manifest.
+
+### Jim's CI — Option A: handles provider install himself
+
+```yaml
+# jim/my-fleet/.github/workflows/deploy.yml
+name: Deploy fleet
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install mcp-app mcp-app-cloudrun mcp-app-hackerhost
+      - run: mcp-app fleet deploy --all
+```
+
+### Jim's CI — Option B: uses echomodel's reusable workflow
+
+```yaml
+# jim/my-fleet/.github/workflows/deploy.yml
+name: Deploy fleet
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    uses: echomodel/fleet-actions/.github/workflows/deploy.yml@v1
+    with:
+      providers: mcp-app-cloudrun mcp-app-hackerhost
+```
+
+### Jim's CI — Option C: fleet.yaml declares provider packages
+
+```yaml
+# jim/my-fleet/fleet.yaml (provider section expanded)
+providers:
+  cloudrun:
+    package: mcp-app-cloudrun
+  hackerhost:
+    package: mcp-app-hackerhost
+  local-docker:
+    package: mcp-app-local-docker
+
+# ... rest of fleet.yaml same as above
+```
+
+```yaml
+# jim/my-fleet/.github/workflows/deploy.yml
+name: Deploy fleet
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install mcp-app
+      - run: mcp-app fleet deploy --all
+        # mcp-app reads provider packages from fleet.yaml, installs if missing
+```
+
+### Jim's day-to-day
+
+```bash
+# See everything
+mcp-app fleet list
+#   sales-tools      cloudrun   https://sales-xxx.a.run.app      healthy
+#   echofit          cloudrun   https://echofit-xxx.a.run.app     healthy
+#   acme-crm         cloudrun   https://acme-xxx.a.run.app        healthy
+#   experiments      hackerhost https://exp.hackerhost.app         healthy
+#   sales-tools-dev  local      http://localhost:9090              healthy
+#   partner-api      —          https://partner.example.com        unmanaged
+
+# Deploy one app
+mcp-app fleet deploy echofit
+
+# Health check everything
+mcp-app fleet health
+
+# Manage users — provider resolves signing key, no secrets on disk
+mcp-app users add --app sales-tools user@example.com
+mcp-app users add --app echofit user@example.com
+```
+
+### What each person touches
+
+| Person | What they publish | What they configure |
+|--------|------------------|-------------------|
+| **Solution author** (echomodel, Jim, Acme) | `mcp-app.yaml` in their repo, or a container image | Nothing deployment-related |
+| **Provider author** (echomodel, Bob, HackerHost) | pip package with entry point | Nothing fleet-related |
+| **Operator** (Jim) | fleet.yaml + CI workflow | Provider config, solution list |
+
+No one touches anyone else's stuff. Solution authors don't know about Jim's fleet.
+Provider authors don't know about Jim's solutions. Jim's fleet.yaml is the only
+place all three meet.
