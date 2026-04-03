@@ -27,33 +27,70 @@ middleware:
 
 A git repo serving as a durable, portable registry of what's deployed and where. Like the Claude Code plugin marketplace pattern — a git repo as a registry.
 
+### Schema
+
 ```yaml
 # fleet.yaml
-provider: cloudrun
-provider_config:
-  project: my-project
-  region: us-central1
+
+providers:
+  cloudrun:
+    package: mcp-app-cloudrun
+    config:
+      project: my-project
+      region: us-central1
+  hackerhost:
+    package: mcp-app-hackerhost
+    config:
+      team: jim-team
+      tier: starter                   # cheap scaled-down infra
+  local-docker:
+    package: mcp-app-local-docker
+
+defaults:
+  deploy: cloudrun
+  runtime: mcp-app
 
 solutions:
-  echofit:
-    source: echomodel/echofit
-  monarch-mcp:
-    source: echomodel/monarch-access
-    provider_config:
-      region: us-east1              # per-solution override
-  third-party:
-    source: ghcr.io/someone/their-app:v2
-    managed: false                  # deploy only, no admin
+  my-app:
+    source: owner/repo
 ```
+
+**`providers`** — named deploy providers, configured once. Each entry has a
+`package` (pip package name for auto-install or documentation) and optional
+`config` (provider-specific defaults).
+
+**`defaults`** — inherited by all solutions unless overridden.
+- `deploy` — which deploy provider to use (references a key in `providers`)
+- `runtime` — how to manage the running service. `mcp-app` means full admin
+  lifecycle (user management, signing key resolution, and any future mcp-app
+  features). `none` means deploy and track only.
+
+**`solutions`** — the fleet. Each entry needs at minimum a `source`. Everything
+else is inherited from defaults or provider config.
+
+**Two orthogonal axes per solution:**
+
+| Axis | What it controls | Default | Examples |
+|------|-----------------|---------|----------|
+| `deploy` | Where and how to deploy | From `defaults.deploy` | `cloudrun`, `hackerhost`, `local-docker` |
+| `runtime` | How to manage once running | From `defaults.runtime` | `mcp-app`, `none` |
 
 **Source field supports three shapes:**
 - `owner/repo` — GitHub repo, mcp-app clones and builds
 - `registry.io/image:tag` — pre-built container image, deploy directly
 - `./local-path` — relative to fleet repo or absolute, for dev/testing
 
-**Provider config** has defaults at the top level, overridable per-solution.
+**Per-solution overrides** merge into the provider's base config:
 
-**`managed: false`** marks solutions that aren't mcp-app services (no `/admin`, no `/health`). Deploy and track only.
+```yaml
+solutions:
+  special:
+    source: owner/repo
+    deploy:
+      provider: cloudrun
+      config:
+        region: asia-east1          # overrides just this field
+```
 
 ## Deploy Providers — pip Packages, Entry Point Discovery
 
@@ -120,27 +157,79 @@ Three scenarios, all identical to mcp-app:
 
 All three declare the same entry point. The operator `pip install`s whichever one and puts the name in fleet.yaml. mcp-app doesn't know or care who wrote it.
 
-## No Local Secrets
+## Environment Variables and Secrets
 
-Signing keys are generated at deploy time and stored in the provider's secret store (e.g., GCP Secret Manager). They never touch the operator's disk.
+Solutions need two kinds of runtime configuration: plain env vars and secrets.
+Both are deployment concerns — they belong in the fleet manifest, not the
+solution repo.
 
-When the operator runs admin commands, the provider resolves the signing key on demand using the operator's existing cloud auth (e.g., ADC via `gcloud auth application-default login`):
+```yaml
+solutions:
+  sales-tools:
+    source: jim/sales-tools
+    env:
+      LOG_LEVEL: INFO
+      MAX_RESULTS: "50"
+    secrets:
+      SIGNING_KEY:
+        generate: true              # provider auto-generates at first deploy
+      THIRD_PARTY_API_KEY:
+        value: secret-name-in-store # reference, not the actual value
+```
+
+**`env`** — plain key-value pairs. Passed to the container as environment
+variables. Safe to store in fleet.yaml (version controlled).
+
+**`secrets`** — references to values in the provider's secret store (e.g., GCP
+Secret Manager). Fleet.yaml never contains actual secret values — only
+references or generation directives. The provider resolves them at deploy time
+and injects them into the container's environment.
+
+`SIGNING_KEY` with `generate: true` is special: the provider generates a
+random key at first deploy, stores it in its secret store, and injects it. On
+subsequent deploys it reuses the stored value. This is how mcp-app services
+bootstrap their admin auth without the operator ever seeing the key.
+
+### No local secrets
+
+Secrets never touch the operator's disk. When admin commands need the signing
+key, the deploy provider resolves it on demand using the operator's existing
+cloud auth (e.g., ADC via `gcloud auth application-default login`):
 
 ```
 mcp-app users add --app echofit user@example.com
-  → reads fleet.yaml → echofit uses cloudrun provider
+  → reads fleet.yaml → echofit uses cloudrun provider, runtime is mcp-app
   → provider fetches signing key from Secret Manager (via ADC)
   → mcp-app mints admin JWT in memory
   → calls /admin/users on the deployed URL
   → key is garbage collected, never written to disk
 ```
 
+This only applies to solutions with `runtime: mcp-app`. Solutions with
+`runtime: none` have no signing key and no admin API.
+
+### Provider auth
+
+Providers handle their own authentication. Fleet.yaml never contains provider
+credentials. Examples:
+
+- **cloudrun** — uses Application Default Credentials (ADC). The operator runs
+  `gcloud auth application-default login` once. The provider picks it up
+  automatically via the GCP SDK.
+- **hackerhost** — might use its own CLI login (`hh auth login`), an env var,
+  or whatever auth mechanism HackerHost provides.
+- **local-docker** — no auth needed.
+
+This is the same model as Terraform providers: the provider is responsible for
+its own auth. The fleet manifest configures what to deploy and where, not how
+to authenticate.
+
 ## Lifecycle
 
 ```bash
 # One-time setup
 gcloud auth application-default login
-pip install mcp-app-cloudrun
+pip install mcp-app mcp-app-cloudrun
 mcp-app fleet add https://github.com/me/my-fleet.git
 
 # Ongoing
@@ -182,19 +271,32 @@ middleware:
   - user-identity
 ```
 
-He also uses `echomodel/echofit` (open source) and a commercial MCP service
-from Acme Corp that publishes a pre-built image.
+He also uses `echomodel/echofit` (open source), a commercial MCP service from
+Acme Corp that publishes a pre-built image (built with mcp-app), and a partner
+service that doesn't use mcp-app at all.
 
 ### Jim's fleet repo
 
 ```yaml
 # jim/my-fleet/fleet.yaml
 
-# Default provider for most things
-provider: cloudrun
-provider_config:
-  project: jim-prod
-  region: us-central1
+providers:
+  cloudrun:
+    package: mcp-app-cloudrun
+    config:
+      project: jim-prod
+      region: us-central1
+  hackerhost:
+    package: mcp-app-hackerhost
+    config:
+      team: jim-team
+      tier: starter                   # cheap scaled-down infra
+  local-docker:
+    package: mcp-app-local-docker
+
+defaults:
+  deploy: cloudrun
+  runtime: mcp-app
 
 solutions:
 
@@ -202,37 +304,30 @@ solutions:
   sales-tools:
     source: jim/sales-tools
 
-  # Open source app — different org, same provider
+  # Open source app — different org, same defaults
   echofit:
     source: echomodel/echofit
 
-  # Commercial app — pre-built image, no build step
+  # Commercial app — pre-built image, built with mcp-app
+  # (runtime: mcp-app inherited — admin tools work because Acme used the framework)
   acme-crm:
     source: ghcr.io/acmecorp/crm-mcp:v3.1
 
-  # Jim's experimental app — runs on HackerHost instead of Cloud Run
+  # Jim's experimental app — different deploy provider, same runtime
   experiments:
     source: jim/mcp-experiments
-    provider: hackerhost
-    provider_config:
-      api_key_secret: jim-hh-key
-      region: eu-west
+    deploy: hackerhost
 
-  # Local dev instance — runs in Docker on Jim's machine
-  sales-tools-dev:
-    source: ./sales-tools-local
-    provider: local-docker
-    provider_config:
-      port: 9090
-
-  # Third-party service Jim doesn't manage — just tracks the URL
+  # Partner service — not built with mcp-app, deploy and track only
   partner-api:
     source: ghcr.io/partner/their-service:latest
-    managed: false
+    runtime: none
 ```
 
-Six solutions. Three source types (GitHub repos, container images, local path).
-Three providers (Cloud Run, HackerHost, local Docker). One fleet manifest.
+Five shared solutions. Three source types (GitHub repos, container images, local path).
+Two deploy providers (Cloud Run, HackerHost). Two runtime modes (mcp-app, none).
+One fleet manifest. Jim also has a `.fleet.local.yaml` with a local-docker dev
+instance that only he sees.
 
 ### Jim's CI — Option A: handles provider install himself
 
@@ -273,18 +368,8 @@ jobs:
 
 ### Jim's CI — Option C: fleet.yaml declares provider packages
 
-```yaml
-# jim/my-fleet/fleet.yaml (provider section expanded)
-providers:
-  cloudrun:
-    package: mcp-app-cloudrun
-  hackerhost:
-    package: mcp-app-hackerhost
-  local-docker:
-    package: mcp-app-local-docker
-
-# ... rest of fleet.yaml same as above
-```
+The `package` field in each provider entry tells mcp-app what to install.
+CI only needs to install mcp-app itself:
 
 ```yaml
 # jim/my-fleet/.github/workflows/deploy.yml
@@ -311,17 +396,29 @@ jobs:
 ```bash
 # See everything
 mcp-app fleet list
-#   sales-tools      cloudrun   https://sales-xxx.a.run.app      healthy
-#   echofit          cloudrun   https://echofit-xxx.a.run.app     healthy
-#   acme-crm         cloudrun   https://acme-xxx.a.run.app        healthy
-#   experiments      hackerhost https://exp.hackerhost.app         healthy
-#   sales-tools-dev  local      http://localhost:9090              healthy
-#   partner-api      —          https://partner.example.com        unmanaged
+#   sales-tools      cloudrun     https://sales-xxx.a.run.app      healthy
+#   echofit          cloudrun     https://echofit-xxx.a.run.app     healthy
+#   acme-crm         cloudrun     https://acme-xxx.a.run.app        healthy
+#   experiments      hackerhost   https://exp.hackerhost.app         healthy
+#   partner-api      cloudrun     https://partner.example.com        (unmanaged)
+#   sales-tools-dev  local-docker http://localhost:9090              healthy  (local)
+
+# JSON output includes full metadata:
+# mcp-app fleet list --format=json
+# [
+#   {"name": "echofit", "deploy": "cloudrun", "runtime": "mcp-app",
+#    "url": "https://echofit-xxx.a.run.app", "status": "healthy",
+#    "scope": "fleet", "source": "echomodel/echofit"},
+#   {"name": "sales-tools-dev", "deploy": "local-docker", "runtime": "mcp-app",
+#    "url": "http://localhost:9090", "status": "healthy",
+#    "scope": "local", "source": "./sales-tools-local"},
+#   ...
+# ]
 
 # Deploy one app
 mcp-app fleet deploy echofit
 
-# Health check everything
+# Health check managed services
 mcp-app fleet health
 
 # Manage users — provider resolves signing key, no secrets on disk
@@ -340,3 +437,77 @@ mcp-app users add --app echofit user@example.com
 No one touches anyone else's stuff. Solution authors don't know about Jim's fleet.
 Provider authors don't know about Jim's solutions. Jim's fleet.yaml is the only
 place all three meet.
+
+## Local Overrides
+
+Fleet.yaml is shared — committed, versioned, same for the whole team. But
+individual operators may want local dev instances, personal provider overrides,
+or experimental solutions that don't belong in the shared manifest.
+
+A `.fleet.local.yaml` in the fleet repo (gitignored) merges on top of
+fleet.yaml at runtime:
+
+```yaml
+# .fleet.local.yaml (gitignored — never committed)
+providers:
+  local-docker:
+    package: mcp-app-local-docker
+
+solutions:
+  sales-tools-dev:
+    source: ./sales-tools-local
+    deploy: local-docker
+  echofit:
+    deploy: local-docker              # override shared solution to run locally
+```
+
+- Local-only solutions appear in `mcp-app fleet list` for that operator only
+- Shared solutions can be overridden (e.g., run echofit locally instead of on Cloud Run)
+- Other team members never see it
+- Same pattern as `.env.local`, `docker-compose.override.yml`
+
+The fleet repo's `.gitignore` includes `.fleet.local.yaml` by default.
+
+## Design FAQ
+
+### Why is provider `config` unstructured?
+
+mcp-app doesn't validate the contents of a provider's `config` block. It passes
+the dict straight through to the provider, which validates its own config.
+
+This is intentional. Cloud Run needs `project` and `region`. HackerHost needs
+`team` and `tier`. A future provider might need fields that don't exist yet.
+mcp-app's schema defines the outer structure (`providers`, `config`, `solutions`)
+but the provider-specific contents are opaque — defined and documented by the
+provider package, not by mcp-app.
+
+This is the same pattern as Terraform provider blocks, Kubernetes custom
+resources, and Docker Compose driver options.
+
+### Why don't provider credentials appear in fleet.yaml?
+
+Providers handle their own authentication. Fleet.yaml configures *what* to deploy
+and *where*, not *how to authenticate*. Examples:
+
+- **cloudrun** uses Application Default Credentials (ADC). The operator runs
+  `gcloud auth application-default login` once. The GCP SDK picks it up.
+- **hackerhost** might use its own CLI login, an env var, or whatever auth
+  HackerHost provides.
+- **local-docker** needs no auth.
+
+This keeps secrets out of version control entirely. Auth is machine state
+(a login session, a token in a keyring), not config.
+
+### Why two axes (deploy + runtime) instead of a single `managed` flag?
+
+`deploy` and `runtime` are independent concerns:
+
+- A solution can use Cloud Run for deploy and mcp-app for runtime management
+- The same solution could move to HackerHost for deploy without changing runtime
+- A non-mcp-app service can still be deployed and tracked (`runtime: none`)
+
+A single `managed: true/false` conflates "is this an mcp-app service?" with
+deployment details. Separating the axes means each can evolve independently.
+Today `runtime` is either `mcp-app` or `none`. If mcp-app adds features later
+(metrics, log aggregation, config push), every `runtime: mcp-app` solution
+gets them automatically — no new flags needed.
