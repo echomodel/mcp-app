@@ -288,6 +288,55 @@ This is the same model as Terraform providers: the provider is responsible for
 its own auth. The fleet manifest configures what to deploy and where, not how
 to authenticate.
 
+## CLI Design
+
+### Command groups
+
+| Group | Who uses it | What it does |
+|-------|------------|-------------|
+| `mcp-app serve` | Solution developer | Run the app locally from cwd |
+| `mcp-app build` | Solution developer | Build a Docker image from cwd |
+| `mcp-app fleets` | Operator | Register, list, switch fleets |
+| `mcp-app fleet` | Operator | Deploy, list, health-check solutions in active fleet |
+| `mcp-app users` | Operator | Manage users on a deployed instance |
+| `mcp-app tokens` | Operator | Manage tokens on a deployed instance |
+| `mcp-app health` | Operator | Health-check a deployed instance |
+| `mcp-app admin-tools` | Agent/MCP client | Stdio MCP server for admin operations |
+
+### cwd is never used for deploy or admin
+
+`mcp-app serve` and `mcp-app build` read `mcp-app.yaml` from the current
+directory — you're the solution developer working in your repo.
+
+All other commands ignore the current directory entirely. Deploy reads from
+the fleet's source refs. Admin commands talk to a remote URL. The operator's
+cwd is irrelevant and must never influence behavior. This is a hard rule,
+not a default.
+
+### Target resolution for admin commands
+
+Admin commands (`users`, `tokens`, `health`) need a URL and signing key.
+Two modes, no fallback between them:
+
+**Fleetless** — point at a URL directly:
+```bash
+mcp-app set-base-url https://my-app-xxx.a.run.app
+export MCP_APP_SIGNING_KEY=...
+mcp-app users add user@example.com
+```
+
+**Fleet** — resolve by name from active fleet:
+```bash
+mcp-app fleets use work
+mcp-app users add --app echofit user@example.com
+```
+
+`--app` is fleet-only. No active fleet means `--app` is an error.
+No `--app` with an active fleet means error — the fleet has multiple
+solutions, you must specify which one.
+
+Explicit `--url` and `--signing-key` flags always work regardless of mode.
+
 ## Lifecycle
 
 ```bash
