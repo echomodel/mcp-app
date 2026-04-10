@@ -48,12 +48,21 @@ class AdminClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def register_user(self, email: str) -> dict:
-        """Register a user and return their token."""
+    async def register_user(self, email: str, credential=None) -> dict:
+        """Register a user and return their token.
+
+        Args:
+            email: User's email address.
+            credential: Optional backend credential for API-proxy apps.
+                String (bearer token) or dict (OAuth2 credentials).
+        """
+        body = {"email": email}
+        if credential is not None:
+            body["credential"] = credential
         resp = await self._http.post(
             f"{self.base_url}/admin/users",
             headers=self._headers(),
-            json={"email": email},
+            json=body,
             timeout=10,
         )
         resp.raise_for_status()

@@ -16,7 +16,11 @@ from starlette.routing import Mount
 from mcp_app.admin import create_admin_app
 from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
-from mcp_app.middleware import JWTMiddleware
+from mcp_app.middleware import (
+    JWTMiddleware,
+    BearerProxyMiddleware,
+    GoogleOAuth2ProxyMiddleware,
+)
 from mcp_app.verifier import JWTVerifier
 
 
@@ -28,7 +32,8 @@ STORE_ALIASES = {
 # Built-in middleware aliases
 MIDDLEWARE_ALIASES = {
     "user-identity": JWTMiddleware,
-    # "credential-proxy": CredentialProxyMiddleware,  # future
+    "bearer-proxy": BearerProxyMiddleware,
+    "google-oauth2-proxy": GoogleOAuth2ProxyMiddleware,
 }
 
 
@@ -109,7 +114,7 @@ def build_asgi(config: dict, mcp: FastMCP, store) -> Starlette:
     """Build the full ASGI app with middleware and admin."""
     auth_store = DataStoreAuthAdapter(store)
     verifier = JWTVerifier(auth_store)
-    admin_app = create_admin_app(auth_store)
+    admin_app = create_admin_app(auth_store, data_store=store)
 
     inner = mcp.streamable_http_app()
 
