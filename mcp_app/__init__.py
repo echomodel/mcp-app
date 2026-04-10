@@ -24,4 +24,6 @@ __all__ = [
     "UserAuthRecord",
     "UserAuthStore",
     "UserDataStore",
+    "run",
+    "entry",
 ]

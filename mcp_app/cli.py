@@ -73,16 +73,10 @@ def serve(app_path, host, port):
     APP_PATH: Optional path to the directory containing mcp-app.yaml.
     Defaults to the current working directory.
     """
-    import uvicorn
-    from mcp_app.bootstrap import build_app
+    from mcp_app.run import serve as run_serve
 
-    config_path = Path(app_path) / "mcp-app.yaml" if app_path else None
-    app, mcp, store, config = build_app(config_path)
-
-    import mcp_app
-    mcp_app._store = store
-
-    uvicorn.run(app, host=host, port=port)
+    config_path = Path(app_path) / "mcp-app.yaml" if app_path else Path.cwd() / "mcp-app.yaml"
+    run_serve(config_path, host=host, port=port)
 
 
 @main.command()
@@ -96,26 +90,10 @@ def stdio(app_path):
     Reads mcp-app.yaml, discovers tools, wires the store, and runs
     FastMCP over stdin/stdout. No middleware, no admin endpoints.
     """
-    from mcp_app.bootstrap import build_stdio
-    from mcp_app.context import current_user_id
+    from mcp_app.run import stdio as run_stdio
 
-    config_path = Path(app_path) / "mcp-app.yaml" if app_path else None
-    mcp, store, config = build_stdio(config_path)
-
-    import mcp_app
-    mcp_app._store = store
-
-    # Set stdio identity from config
-    stdio_config = config.get("stdio", {})
-    user = stdio_config.get("user")
-    if not user:
-        raise click.ClickException(
-            "stdio.user not configured in mcp-app.yaml. "
-            "Add:\n\n  stdio:\n    user: \"local\"\n"
-        )
-    current_user_id.set(user)
-
-    mcp.run(transport="stdio")
+    config_path = Path(app_path) / "mcp-app.yaml" if app_path else Path.cwd() / "mcp-app.yaml"
+    run_stdio(config_path)
 
 
 @main.command("set-base-url")
