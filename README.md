@@ -5,7 +5,7 @@ Config-driven framework for building and running MCP servers as HTTP services. D
 ## Install
 
 ```bash
-pip install git+https://github.com/krisrowe/mcp-app.git
+pip install git+https://github.com/echomodel/mcp-app.git
 ```
 
 ## Quick Start
@@ -14,9 +14,6 @@ Create `mcp-app.yaml` in your repo root:
 
 ```yaml
 name: my-app
-store: filesystem
-middleware:
-  - user-identity
 tools: my_app.mcp.tools
 ```
 
@@ -33,106 +30,91 @@ async def do_thing(param: str) -> dict:
     return sdk.do_thing(param)
 ```
 
-Run as HTTP service:
+Run locally or as HTTP service:
 
 ```bash
-mcp-app serve
+mcp-app stdio   # local, single user, stdin/stdout
+mcp-app serve   # HTTP, multi-user, production
 ```
 
 ## mcp-app.yaml Reference
 
 ```yaml
 name: my-app                    # Required — MCP server name, data store path
-store: filesystem               # Required — data store (alias or module path)
-middleware:                      # Optional — omit for no auth
-  - user-identity               #   array of middleware (alias or module path)
 tools: my_app.mcp.tools         # Required — module path to discover tools from
+store: filesystem               # Optional — defaults to filesystem
+stdio:                          # Required for stdio mode
+  user: "local"                 #   identity for the local session
 ```
+
+Only `name` and `tools` are required. Identity middleware runs automatically in HTTP mode. Store defaults to filesystem.
 
 ### Store
 
 | Value | Description |
 |-------|-------------|
-| `filesystem` | Built-in. Per-user directories with `~` email encoding. Reads `APP_USERS_PATH` env var, falls back to `~/.local/share/{name}/users/` |
+| `filesystem` | Default. Per-user directories with `~` email encoding. Reads `APP_USERS_PATH` env var, falls back to `~/.local/share/{name}/users/` |
 | `my.module.MyStore` | Custom. Any class satisfying the `UserDataStore` protocol (`load`, `save`, `list_users`, `delete`) |
 
 No dot = built-in alias. Dot = Python module path, dynamically imported.
 
 ### Middleware
 
-| Value | Description |
-|-------|-------------|
-| `user-identity` | Validates JWT, extracts `sub` claim, sets `current_user_id` ContextVar. For data-owning apps. |
-| `bearer-proxy` | Validates JWT, swaps for stored backend token (PAT, API key), rewrites Authorization header. For API-proxy apps. (Planned — [#8](https://github.com/echomodel/mcp-app/issues/8)) |
-| `google-oauth2-proxy` | Like bearer-proxy but refreshes expired Google OAuth2 access tokens. For apps wrapping Google APIs. (Planned — [#8](https://github.com/echomodel/mcp-app/issues/8)) |
-| `my.module.MyMiddleware` | Custom. ASGI middleware class with signature `__init__(self, app, verifier, store=None)` |
+Identity middleware (`user-identity`) runs automatically in HTTP mode. It validates JWTs, loads the full user record from the store, and sets the `current_user` ContextVar. You don't need to configure it.
 
-Middleware is an array — order matters (first = outermost). Omit entirely for no auth.
+To add custom middleware or disable auth entirely:
+
+```yaml
+# Custom middleware (user-identity must be included explicitly)
+middleware:
+  - my_app.auth.RateLimiter
+  - user-identity
+
+# No auth (explicitly empty)
+middleware: []
+```
+
+Custom middleware must match the signature `__init__(self, app, verifier, store=None)`.
 
 ### Two App Patterns
 
-Data-owning apps and API-proxy apps use nearly identical setup. The only difference is one line in `mcp-app.yaml`:
+Both data-owning and API-proxy apps use the same framework. The difference is what the SDK reads from the user context.
 
 **Data-owning app** (owns user data — food logs, notes, etc.):
 
-```yaml
-# mcp-app.yaml
-name: my-data-app
-store: filesystem
-middleware:
-  - user-identity
-tools: my_data_app.mcp.tools
+```python
+# my_data_app/sdk/core.py
+from mcp_app.context import current_user
+from mcp_app import get_store
+
+class MySDK:
+    def save_entry(self, data):
+        user = current_user.get()
+        store = get_store()
+        store.save(user.email, "entries/today", data)
 ```
+
+The SDK reads `current_user.get().email` to scope data. The store holds per-user app data.
+
+**API-proxy app** (wraps an external API — financial data, Google Workspace, etc.):
 
 ```python
-# my_data_app/mcp/tools.py
-from my_data_app.sdk.core import MySDK
+# my_proxy/sdk/core.py
+from mcp_app.context import current_user
+import httpx
 
-sdk = MySDK()
-
-async def save_entry(data: dict) -> dict:
-    """Save a data entry for the current user."""
-    return sdk.save(data)  # SDK reads current_user_id internally
+class MySDK:
+    def list_items(self):
+        user = current_user.get()
+        token = user.profile["token"]
+        resp = httpx.get("https://api.example.com/items",
+                         headers={"Authorization": f"Bearer {token}"})
+        return resp.json()
 ```
 
-The `user-identity` middleware validates the JWT, extracts the user's email from the `sub` claim, and sets the `current_user_id` ContextVar. The SDK reads it to scope data per user. The request passes through unchanged.
+The SDK reads `current_user.get().profile` for the backend credential. The profile was saved at registration time and loaded in one read with the auth record.
 
-**API-proxy app** (wraps an external API — financial data, task management, etc.):
-
-```yaml
-# mcp-app.yaml — static tokens (PATs, API keys)
-name: my-api-proxy
-store: filesystem
-middleware:
-  - bearer-proxy
-tools: my_api_proxy.mcp.tools
-```
-
-```yaml
-# mcp-app.yaml — Google APIs (OAuth2 with token refresh)
-name: my-google-proxy
-store: filesystem
-middleware:
-  - google-oauth2-proxy
-tools: my_google_proxy.mcp.tools
-```
-
-```python
-# my_api_proxy/mcp/tools.py
-from my_api_proxy.sdk.core import MySDK
-
-sdk = MySDK()
-
-async def list_items() -> dict:
-    """List items from the external API."""
-    return sdk.list_items()  # SDK reads Authorization header (backend token)
-```
-
-The proxy middleware validates the JWT, looks up the stored backend credential for that user, resolves an access token (passthrough for bearer, refresh for Google OAuth2), and rewrites the `Authorization` header. The SDK receives a valid backend API token — it doesn't know about JWTs or user management.
-
-Note: `bearer-proxy` and `google-oauth2-proxy` are planned — see [#8](https://github.com/echomodel/mcp-app/issues/8). Custom middleware via module path works today for API-proxy apps.
-
-**What's identical:** store setup, admin endpoints, tool discovery, `mcp-app.yaml` structure, deployment. Only the middleware choice differs.
+**What's identical:** store setup, admin endpoints, tool discovery, yaml structure, deployment. The middleware is the same. The SDK decides what to read from the user context.
 
 ### Tool Discovery
 
@@ -142,30 +124,60 @@ The `tools` module is imported and all public async functions (not starting with
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `SIGNING_KEY` | For HTTP | none — required | JWT signing key. Must be set when middleware is configured. |
+| `SIGNING_KEY` | For HTTP | none — required | JWT signing key. Must be set for HTTP mode. |
 | `JWT_AUD` | No | None (skip) | Token audience validation |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
 | `TOKEN_DURATION_SECONDS` | No | 315360000 (~10yr) | Default token lifetime |
 
-## User Identity
+## User Identity and Profile
 
-Every mcp-app solution requires that `current_user_id` is set before tools execute. There is no default — tools that run without an established identity return an error.
+Every mcp-app solution has a `current_user` ContextVar set before tools execute. No default — tools that run without an established identity return an error.
 
-| Transport | How identity is set |
-|-----------|-------------------|
-| HTTP (`mcp-app serve`) | Middleware extracts it from the JWT `sub` claim |
-| stdio (`mcp-app stdio`) | Configured in `mcp-app.yaml` under `stdio.identity` |
-| Direct SDK use | Caller sets `current_user_id` explicitly before calling SDK methods |
+| Transport | How it's set |
+|-----------|-------------|
+| HTTP (`mcp-app serve`) | Identity middleware validates JWT, loads full user record from store |
+| stdio (`mcp-app stdio`) | CLI loads user record from store using `stdio.user` from yaml |
 
 The SDK reads it:
 
 ```python
-from mcp_app.context import current_user_id
+from mcp_app.context import current_user
 
-user = current_user_id.get()  # "alice@example.com" (HTTP) or "local" (stdio)
+user = current_user.get()
+user.email       # "alice@example.com" (HTTP) or "local" (stdio)
+user.profile     # dict or typed Pydantic model — whatever was saved at registration
 ```
 
-### stdio identity configuration
+### Profile
+
+The user record includes an optional `profile` field — app-specific data saved at registration time (backend credentials, preferences, config). mcp-app stores it and loads it but does not interpret it.
+
+For typed profile access, the app registers a Pydantic model:
+
+```python
+# my_app/__init__.py
+from pydantic import BaseModel
+from mcp_app.context import register_profile
+
+class Profile(BaseModel):
+    token: str
+
+register_profile(Profile)
+```
+
+Now `user.profile.token` is typed and validated. If no model is registered, `user.profile` is a raw dict.
+
+### User registration with profile
+
+```bash
+# Data-owning app — no profile needed
+mcp-app users add alice@example.com
+
+# API-proxy app — profile contains backend credential
+mcp-app users add alice@example.com --profile '{"token": "api-key-xxx"}'
+```
+
+### stdio configuration
 
 ```yaml
 # mcp-app.yaml
@@ -173,17 +185,13 @@ stdio:
   user: "local"
 ```
 
-The `user` value is set as `current_user_id` for the session. It scopes
-data storage — `~/.local/share/{name}/users/{user}/`. There is no
-authentication in stdio mode; the MCP client launches the process directly.
-
-`mcp-app stdio` refuses to start without `stdio.user` configured.
+`mcp-app stdio` loads the user record for `"local"` from the store and sets `current_user`. Refuses to start without `stdio.user` configured.
 
 ## Admin Endpoints
 
-When middleware is configured, REST admin endpoints are mounted at `/admin`:
+REST admin endpoints are mounted at `/admin` in HTTP mode:
 
-- `POST /admin/users` — register user, returns JWT
+- `POST /admin/users` — register user (with optional profile), returns JWT
 - `GET /admin/users` — list users
 - `DELETE /admin/users/{email}` — revoke user
 - `POST /admin/tokens` — issue new token for existing user
@@ -194,7 +202,7 @@ Gated by admin-scoped JWT (`scope: "admin"`, same signing key).
 
 ### With gapp
 
-[gapp](https://github.com/krisrowe/gapp) detects `mcp-app.yaml` automatically. No `service.entrypoint` needed in `gapp.yaml`:
+[gapp](https://github.com/echomodel/gapp) detects `mcp-app.yaml` automatically. No `service.entrypoint` needed in `gapp.yaml`:
 
 ```yaml
 # gapp.yaml — just env vars and public access
@@ -220,7 +228,7 @@ EXPOSE 8080
 CMD ["mcp-app", "serve"]
 ```
 
-Set environment variables for `SIGNING_KEY` and `APP_USERS_PATH`.
+Set `SIGNING_KEY` environment variable.
 
 ### MCP Client Configuration
 
@@ -271,11 +279,6 @@ Remote MCP servers added through Claude.ai are available across all
 Claude clients — web, mobile app, and Claude Code — without separate
 configuration for each.
 
-Note: Claude Code does not currently support env var interpolation in
-HTTP headers. Tokens are stored in cleartext in the local config. For
-stdio servers, use `-e KEY=value` to pass secrets as environment
-variables.
-
 ## Architecture
 
 mcp-app wraps [FastMCP](https://github.com/modelcontextprotocol/python-sdk) (the official MCP Python SDK) and [Starlette](https://www.starlette.io/) (ASGI framework). Solutions never import these directly — mcp-app handles all wiring.
@@ -284,9 +287,8 @@ mcp-app wraps [FastMCP](https://github.com/modelcontextprotocol/python-sdk) (the
 mcp-app.yaml
     → bootstrap reads config
     → imports tools module, discovers async functions
-    → registers each as FastMCP tool
+    → registers each as FastMCP tool (with identity enforcement)
     → creates data store from config
-    → stacks middleware from config
-    → composes admin endpoints + middleware + FastMCP into one ASGI app
-    → serves via uvicorn (mcp-app serve)
+    → HTTP: wraps with identity middleware + admin endpoints → uvicorn
+    → stdio: loads user record from store → FastMCP over stdin/stdout
 ```
