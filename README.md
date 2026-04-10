@@ -142,7 +142,7 @@ The `tools` module is imported and all public async functions (not starting with
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `SIGNING_KEY` | For HTTP | `dev-key` | JWT signing key |
+| `SIGNING_KEY` | For HTTP | none — required | JWT signing key. Must be set when middleware is configured. |
 | `JWT_AUD` | No | None (skip) | Token audience validation |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
 | `TOKEN_DURATION_SECONDS` | No | 315360000 (~10yr) | Default token lifetime |

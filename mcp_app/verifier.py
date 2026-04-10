@@ -20,13 +20,19 @@ class JWTVerifier:
     """Validates JWTs and checks revocation against a UserAuthStore.
 
     Reads configuration from environment variables:
-        SIGNING_KEY: JWT signing key (required for real use, defaults to "dev-key")
+        SIGNING_KEY: JWT signing key (required). No default — must be set.
         JWT_AUD: Expected audience claim. If unset, audience is not checked.
     """
 
     def __init__(self, store: UserAuthStore):
         self.store = store
-        self.signing_key = os.environ.get("SIGNING_KEY", "dev-key")
+        self.signing_key = os.environ.get("SIGNING_KEY")
+        if not self.signing_key:
+            raise RuntimeError(
+                "SIGNING_KEY environment variable is required. "
+                "Set it to a strong random value:\n"
+                "  export SIGNING_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+            )
         self.audience = os.environ.get("JWT_AUD")
 
     async def verify_token(self, token: str) -> VerifiedToken | None:

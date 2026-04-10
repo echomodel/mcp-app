@@ -51,7 +51,11 @@ def create_admin_app(store: UserAuthStore, data_store=None) -> Starlette:
             /admin/users accepts an optional 'credential' field.
     """
 
-    signing_key = os.environ.get("SIGNING_KEY", "dev-key")
+    signing_key = os.environ.get("SIGNING_KEY")
+    if not signing_key:
+        raise RuntimeError(
+            "SIGNING_KEY environment variable is required for admin endpoints."
+        )
     audience = os.environ.get("JWT_AUD")
 
     def _verify_admin(request: Request) -> bool:
