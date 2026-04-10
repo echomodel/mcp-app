@@ -190,6 +190,60 @@ When middleware is configured, REST admin endpoints are mounted at `/admin`:
 
 Gated by admin-scoped JWT (`scope: "admin"`, same signing key).
 
+## Packaging for Distribution
+
+Solutions are standard Python packages. To make your solution installable
+via `pipx` (or `pip`), add three declarations to `pyproject.toml`:
+
+```toml
+[project]
+name = "my-app"
+dependencies = ["mcp-app"]
+
+[project.scripts]
+my-app-mcp = "mcp_app.entry:stdio"
+
+[project.entry-points."mcp_app"]
+app = "my_app"
+
+[tool.setuptools.package-data]
+my_app = ["mcp-app.yaml"]
+```
+
+Place `mcp-app.yaml` inside your package directory (next to `__init__.py`).
+
+That's it — no Python glue code. mcp-app discovers your package via
+standard Python entry points (`importlib.metadata`) and finds the yaml
+automatically.
+
+Install and register:
+
+```bash
+pipx install my-app
+claude mcp add my-app -- my-app-mcp
+```
+
+For HTTP servers, use `mcp_app.entry:serve` instead of `mcp_app.entry:stdio`.
+
+### How it works
+
+1. `pipx install my-app` installs the package in an isolated venv
+2. User runs `my-app-mcp` (the console script)
+3. That calls `mcp_app.entry:stdio`
+4. `stdio()` queries `importlib.metadata` for the `mcp_app` entry point group
+5. Finds `app = "my_app"`, imports `my_app`, resolves `mcp-app.yaml` next
+   to `__init__.py`
+6. Runs the MCP server over stdio — single process, no subprocess
+
+### During development
+
+No packaging needed. Run directly from your repo:
+
+```bash
+mcp-app stdio    # reads mcp-app.yaml from cwd
+mcp-app serve    # same, but HTTP
+```
+
 ## Deployment
 
 ### With gapp
@@ -226,7 +280,12 @@ Set environment variables for `SIGNING_KEY` and `APP_USERS_PATH`.
 
 #### CLI-based registration
 
-**Claude Code (stdio — local):**
+**Claude Code (stdio — pipx-installed):**
+```bash
+claude mcp add my-app -- my-app-mcp
+```
+
+**Claude Code (stdio — from source):**
 ```bash
 claude mcp add my-app -- mcp-app stdio
 ```
@@ -238,7 +297,12 @@ claude mcp add --transport http my-app \
   --header "Authorization: Bearer YOUR_TOKEN"
 ```
 
-**Gemini CLI (stdio — local):**
+**Gemini CLI (stdio — pipx-installed):**
+```bash
+gemini mcp add my-app -- my-app-mcp
+```
+
+**Gemini CLI (stdio — from source):**
 ```bash
 gemini mcp add my-app -- mcp-app stdio
 ```

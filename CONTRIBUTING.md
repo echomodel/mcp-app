@@ -170,14 +170,36 @@ mcp-app refuses to start with a clear error. No silent defaults.
 
 ### Solution entry points
 
-Solutions declare a console script that invokes `mcp-app stdio`:
+Solutions use `mcp_app.entry` for zero-boilerplate packaging. No Python
+glue code — everything is declared in `pyproject.toml`:
 
 ```toml
 [project.scripts]
-my-solution-mcp = "my_solution.cli:run_stdio"
+my-solution-mcp = "mcp_app.entry:stdio"
+
+[project.entry-points."mcp_app"]
+app = "my_solution"
+
+[tool.setuptools.package-data]
+my_solution = ["mcp-app.yaml"]
 ```
 
+Place `mcp-app.yaml` inside the package directory (next to `__init__.py`).
+
+How it works: `mcp_app.entry:stdio` uses `importlib.metadata` to find the
+`mcp_app` entry point group, discovers which package registered `app`,
+imports it, resolves `mcp-app.yaml` relative to `__init__.py`, and runs
+the MCP server. Single process, no subprocess, no cwd dependency.
+
+Works with `pipx install`, `pip install`, and `pip install -e .` (editable).
+
 Users register with: `claude mcp add my-solution -- my-solution-mcp`
+
+For HTTP distribution, use `mcp_app.entry:serve` instead.
+
+`mcp_app.run` provides the underlying Python API (`stdio(config_path)`,
+`serve(config_path)`) for solutions that need explicit control over the
+config path. `mcp_app.entry` calls these internally.
 
 ## Tool Discovery
 

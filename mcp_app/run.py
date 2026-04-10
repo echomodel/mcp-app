@@ -1,12 +1,8 @@
 """Python API for running mcp-app servers.
 
-Call directly from a solution's entry point:
-
-    from pathlib import Path
-    from mcp_app.run import stdio
-    stdio(Path(__file__).parent / "mcp-app.yaml")
-
-For zero-boilerplate packaging, use mcp_app.entry instead.
+Most solutions should use mcp_app.entry (zero-boilerplate entry points
+via pyproject.toml). This module provides the underlying API for solutions
+that need explicit control over the config path.
 """
 
 from pathlib import Path
