@@ -105,33 +105,15 @@ def stdio(app_path):
     import mcp_app
     mcp_app._store = store
 
-    # Set stdio identity from config, or default to "local"
+    # Set stdio identity from config
     stdio_config = config.get("stdio", {})
-    identity = stdio_config.get("identity", {})
-    provider = identity.get("provider", "static")
-
-    if provider == "static":
-        user = identity.get("user", "local")
-        current_user_id.set(user)
-    elif provider == "env":
-        var = identity.get("var")
-        if not var:
-            raise click.ClickException("stdio.identity.provider 'env' requires 'var' field")
-        user = os.environ.get(var)
-        if not user:
-            raise click.ClickException(f"Environment variable {var} not set")
-        current_user_id.set(user)
-    else:
-        # Module path — resolve and call
-        try:
-            module_path, func_name = provider.rsplit(":", 1)
-            import importlib
-            module = importlib.import_module(module_path)
-            resolve_fn = getattr(module, func_name)
-            user = resolve_fn()
-            current_user_id.set(user)
-        except Exception as e:
-            raise click.ClickException(f"Failed to resolve stdio identity from '{provider}': {e}")
+    user = stdio_config.get("user")
+    if not user:
+        raise click.ClickException(
+            "stdio.user not configured in mcp-app.yaml. "
+            "Add:\n\n  stdio:\n    user: \"local\"\n"
+        )
+    current_user_id.set(user)
 
     mcp.run(transport="stdio")
 

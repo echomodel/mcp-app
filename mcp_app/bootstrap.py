@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import functools
 import importlib
 import inspect
 import os
@@ -62,6 +63,24 @@ def _discover_tools(module_path: str) -> list:
     return tools
 
 
+def _require_identity(func):
+    """Wrap a tool function to enforce that current_user_id is set."""
+    from mcp_app.context import current_user_id
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            current_user_id.get()
+        except LookupError:
+            raise ValueError(
+                "No authenticated user identity established. "
+                "HTTP: configure middleware in mcp-app.yaml. "
+                "stdio: configure stdio.identity in mcp-app.yaml."
+            )
+        return await func(*args, **kwargs)
+    return wrapper
+
+
 def build_mcp(config: dict) -> FastMCP:
     """Create FastMCP instance and register discovered tools."""
     name = config.get("name", "mcp-app")
@@ -73,7 +92,7 @@ def build_mcp(config: dict) -> FastMCP:
         raise ValueError("mcp-app.yaml must specify 'tools' module path")
 
     for func in _discover_tools(tools_module):
-        mcp.tool()(func)
+        mcp.tool()(_require_identity(func))
 
     return mcp
 
@@ -128,7 +147,7 @@ def build_stdio(config_path: Path | None = None):
         raise ValueError("mcp-app.yaml must specify 'tools' module path")
 
     for func in _discover_tools(tools_module):
-        mcp.tool()(func)
+        mcp.tool()(_require_identity(func))
 
     return mcp, store, config
 

@@ -149,15 +149,35 @@ The `tools` module is imported and all public async functions (not starting with
 
 ## User Identity
 
-In HTTP mode, the middleware sets `current_user_id` (a ContextVar). The SDK reads it:
+Every mcp-app solution requires that `current_user_id` is set before tools execute. There is no default — tools that run without an established identity return an error.
+
+| Transport | How identity is set |
+|-----------|-------------------|
+| HTTP (`mcp-app serve`) | Middleware extracts it from the JWT `sub` claim |
+| stdio (`mcp-app stdio`) | Configured in `mcp-app.yaml` under `stdio.identity` |
+| Direct SDK use | Caller sets `current_user_id` explicitly before calling SDK methods |
+
+The SDK reads it:
 
 ```python
 from mcp_app.context import current_user_id
 
-user = current_user_id.get()  # "default" (stdio) or "alice@example.com" (HTTP)
+user = current_user_id.get()  # "alice@example.com" (HTTP) or "local" (stdio)
 ```
 
-Without middleware (or when running a solution locally via its own CLI), `current_user_id` defaults to `"default"`.
+### stdio identity configuration
+
+```yaml
+# mcp-app.yaml
+stdio:
+  user: "local"
+```
+
+The `user` value is set as `current_user_id` for the session. It scopes
+data storage — `~/.local/share/{name}/users/{user}/`. There is no
+authentication in stdio mode; the MCP client launches the process directly.
+
+`mcp-app stdio` refuses to start without `stdio.user` configured.
 
 ## Admin Endpoints
 

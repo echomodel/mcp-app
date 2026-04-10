@@ -155,21 +155,18 @@ transports or uses the store/identity infrastructure.
 
 ### stdio identity
 
-Identity in stdio mode must be deliberate, not a silent default. The
-`stdio.identity` config in `mcp-app.yaml` determines how `current_user_id`
-is set:
+Identity in stdio mode is a simple string — there is no authentication.
+The MCP client launches the process directly; if you can run the command,
+you're in. The `stdio.user` config just tells the store which user bucket
+to read/write data from:
 
 ```yaml
 stdio:
-  identity:
-    provider: static    # or "env", "config", or a module path
-    user: "local"
+  user: "local"
 ```
 
-If `stdio.identity` is not configured and `mcp-app stdio` is invoked,
+If `stdio.user` is not configured and `mcp-app stdio` is invoked,
 mcp-app refuses to start with a clear error. No silent defaults.
-
-See echomodel/mcp-app#4 for the full design and acceptance criteria.
 
 ### Solution entry points
 

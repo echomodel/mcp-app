@@ -153,9 +153,17 @@ async def test_unregistered_user(verifier):
     assert resp["status"] == 403
 
 
+async def _simple_ok_app(scope, receive, send):
+    """ASGI app that returns 200 without reading user identity."""
+    body = b'{"status": "ok"}'
+    await send({"type": "http.response.start", "status": 200,
+                "headers": [(b"content-type", b"application/json")]})
+    await send({"type": "http.response.body", "body": body})
+
+
 @pytest.mark.asyncio
 async def test_health_passthrough(verifier):
-    middleware = JWTMiddleware(_passthrough_app, verifier)
+    middleware = JWTMiddleware(_simple_ok_app, verifier)
     resp = await _call_middleware(middleware, path="/health", method="GET")
     assert resp["status"] == 200
 
