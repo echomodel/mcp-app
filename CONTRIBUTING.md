@@ -179,6 +179,20 @@ the code is in a public repo — anyone who reads it can forge JWTs.
 `SIGNING_KEY` must be explicitly set as an environment variable for
 HTTP mode. Missing or empty raises `RuntimeError` at startup.
 
+### /health is a liveness check, not a readiness check
+
+The `/health` endpoint returns `{"status": "ok"}` with no auth
+required. It exists for Cloud Run (and similar platforms) to confirm
+the process is alive and accepting HTTP requests.
+
+It does not check store connectivity, tool module loading, or
+middleware wiring. Those happen at startup — if any of them fail,
+the process crashes and the platform restarts it. A deeper readiness
+check (e.g., "can I reach my database") would mean hitting the
+store on every health ping, which is unnecessary I/O for a probe
+that fires every 10 seconds. App-specific readiness checks belong
+in the app, not the framework.
+
 ### stdio identity comes from --user, not yaml
 
 `mcp-app stdio --user local` specifies the user identity. There is

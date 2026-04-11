@@ -10,7 +10,8 @@ from types import ModuleType
 
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
-from starlette.routing import Mount
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
 
 from mcp_app.admin import create_admin_app
 from mcp_app.bridge import DataStoreAuthAdapter
@@ -125,8 +126,12 @@ def build_asgi(name: str, tools_module: ModuleType,
         async with mcp.session_manager.run():
             yield
 
+    async def health(request):
+        return JSONResponse({"status": "ok"})
+
     app = Starlette(
         routes=[
+            Route("/health", health),
             Mount("/admin", app=admin_app),
             Mount("/", app=wrapped),
         ],
