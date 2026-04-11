@@ -98,14 +98,14 @@ module has no framework coupling.
 
 - `mcp-app.yaml` config format and parser
 - `mcp-app serve` CLI (HTTP mode)
-- `mcp-app stdio` CLI (local mode — not yet implemented, see below)
+- `mcp-app stdio` CLI (local mode)
+- `create_app_cli()` factory for app-specific CLIs with typed profile flags
 - Tool discovery from module path (public async functions)
 - Store abstraction (`filesystem` built-in, custom via module path)
-- Middleware stack (`user-identity` built-in, credential proxy aliases
-  planned, custom via module path)
-- Admin REST endpoints at `/admin` (register, list, revoke users, issue
-  tokens)
-- `current_user_id` ContextVar (set by middleware, read by SDK)
+- Identity middleware (`user-identity`) — runs by default in HTTP mode
+- Admin REST endpoints at `/admin` (register with profile, list, revoke, tokens)
+- `current_user` ContextVar — `User` object with `.email` and `.profile`
+- `register_profile()` — typed profile validation via Pydantic
 - `UserAuthStore` protocol
 - `UserDataStore` protocol + `FileSystemUserDataStore`
 - `DataStoreAuthAdapter` bridge
@@ -125,23 +125,24 @@ module has no framework coupling.
 A solution built with mcp-app works over both transports without code
 changes. Same yaml, same tools module, same SDK.
 
-### HTTP mode (`mcp-app serve`) — implemented
+### HTTP mode (`mcp-app serve`)
 
 The full production stack:
-- FastMCP wrapped with configured middleware (auth)
+- FastMCP wrapped with identity middleware (runs by default)
 - Admin REST endpoints at `/admin`
-- `current_user_id` set by middleware from JWT claims
+- `current_user` set by verifier: full user record (auth + profile) in one store read
 - uvicorn runs internally (port 8080 by default)
 - Store wired and accessible via `get_store()`
 
-### stdio mode (`mcp-app stdio`) — not yet implemented
+### stdio mode (`mcp-app stdio`)
 
 Local single-user mode:
 - FastMCP runs over stdin/stdout
 - No middleware, no admin endpoints, no ASGI layer
-- `current_user_id` set from yaml config (not JWT — no auth in stdio)
+- `current_user` loaded from store using `stdio.user` from yaml (or `--user` flag)
 - Store still wired — `get_store()` works the same way
 - Tool discovery identical to HTTP — same module, same functions
+- `--user` flag overrides yaml for multi-account support
 
 **Why mcp-app matters for stdio:** Without it, solutions that want stdio
 must use FastMCP directly with `@mcp.tool()` decorators and manual setup.
@@ -225,89 +226,63 @@ middleware:                  # Optional — omit for no auth
 
 ### Resolution rules
 
-- No dot in value → built-in alias (`filesystem`, `user-identity`,
-  `bearer-proxy`, etc.)
+- No dot in value → built-in alias (`filesystem`, `user-identity`)
 - Dot in value → Python module path, dynamically imported
 
-This applies to `store`, `middleware` entries, and stdio identity providers.
+This applies to `store` and `middleware` entries.
 
-## Middleware Architecture
+## Middleware and Identity
 
-Middleware is an ordered pipeline of ASGI wrappers. Each entry in the
-`middleware` array wraps the next (first = outermost). All middleware
-shares a uniform constructor signature:
+### How identity works
 
-```python
-def __init__(self, app, verifier: JWTVerifier, store=None)
-```
+Identity middleware (`user-identity`) runs by default in HTTP mode. It:
+1. Extracts JWT from Authorization header or `?token=` query param
+2. Validates JWT signature and claims via `JWTVerifier`
+3. Loads the full user record from the store (auth + profile, one read)
+4. Hydrates the profile with the registered Pydantic model if available
+5. Sets `current_user` ContextVar — available to all tool functions
 
-The `store` parameter exists so credential proxy middleware can access
-per-user credentials. `UserIdentityMiddleware` accepts it but doesn't
-use it.
+The SDK reads `current_user.get()` and gets a `UserRecord` with `.email`
+and `.profile`. One import, one call, typed access.
 
-### Built-in middleware
+### Default behavior
 
-| Alias | Class | Purpose |
-|-------|-------|---------|
-| `user-identity` | `UserIdentityMiddleware` | Data-owning apps. Validates JWT, sets `current_user_id` ContextVar. Request passes through unchanged. |
-
-### Planned middleware (echomodel/mcp-app#8)
-
-| Alias | Class | Purpose |
-|-------|-------|---------|
-| `bearer-proxy` | `BearerProxyMiddleware` | API-proxy apps with static tokens. Validates JWT, looks up stored backend token, rewrites Authorization header. |
-| `google-oauth2-proxy` | `GoogleOAuth2ProxyMiddleware` | API-proxy apps wrapping Google APIs. Same as bearer-proxy but refreshes expired OAuth2 access tokens. |
-
-`bearer-proxy` and `google-oauth2-proxy` share a `CredentialProxyMiddleware`
-base class. The base handles JWT validation, credential lookup from the
-store, and header rewriting. Subclasses implement strategy-specific token
-resolution.
-
-### Custom middleware
-
-Any ASGI middleware class with the uniform signature works:
+If `middleware` is omitted from yaml (the common case), `user-identity`
+runs automatically. To add custom middleware or disable auth:
 
 ```yaml
+# Custom middleware — must include user-identity explicitly
 middleware:
-  - my_app.auth.MyCustomMiddleware
-```
-
-### Two app patterns
-
-**Data-owning** (the solution owns user data — food logs, notes, etc.):
-```yaml
-middleware:
+  - my_app.auth.RateLimiter
   - user-identity
+
+# Explicitly no auth
+middleware: []
 ```
-Middleware validates JWT and sets `current_user_id`. The SDK reads it to
-scope data per user. The request passes through unchanged.
 
-**API-proxy** (the solution wraps an external API — financial data, task
-management, Google Workspace, etc.):
-```yaml
-middleware:
-  - bearer-proxy          # or google-oauth2-proxy
-```
-Middleware validates JWT, looks up the user's stored backend credential,
-resolves an access token (passthrough for bearer, refresh for OAuth2),
-and rewrites the Authorization header. The SDK receives a valid backend
-API token and doesn't know about JWTs or user management.
+### Why no credential proxy middleware
 
-These are explicit peers. Neither is a default. Omitting middleware
-entirely means no auth — valid for internal services or stdio-only tools.
+Earlier designs had `bearer-proxy` and `google-oauth2-proxy` middleware
+that resolved backend credentials and rewrote HTTP Authorization headers.
+These were removed because:
 
-### Why three aliases instead of one configurable middleware
+- **MCP tool functions don't read HTTP headers.** The middleware rewrote
+  a header that nobody read. Tools call SDK methods, not HTTP endpoints.
+- **Credentials are the SDK's concern.** The SDK knows what kind of
+  credential it needs (bearer token, Google OAuth2, etc.) and how to
+  use it. The framework shouldn't interpret credential contents.
+- **One record, one read.** The user profile (which includes credentials)
+  is loaded alongside the auth record by the verifier. No second store
+  read needed. The SDK reads `current_user.get().profile` — already in
+  memory.
+- **Token refresh is the SDK's concern.** Google's `google-auth` library
+  handles OAuth2 token refresh. The SDK refreshes explicitly before API
+  calls and writes back to the store. mcp-app doesn't need to know about
+  Google tokens.
 
-The strategy is an app-level decision, not a per-user decision. Every user
-of a given app uses the same kind of credential for the same backend API.
-Separate aliases mean:
-
-- The admin doesn't specify strategy at registration time — the app already
-  knows
-- The middleware list stays a flat list of strings — no nested config
-- Each alias is self-describing in the yaml
-- Validation happens at startup (bad alias = immediate error, not a runtime
-  surprise)
+The identity middleware handles authentication (who is this user?). The
+SDK handles authorization and credential usage (what can this user do?
+what backend token do they have?).
 
 ### Why pure ASGI middleware, not FastMCP's built-in auth
 
@@ -324,11 +299,35 @@ We rejected these because:
 Pure ASGI middleware owns the ContextVar and sets it before any app code
 runs. The SDK reads it. No bridging. No FastMCP imports in the SDK.
 
-### Why `user-identity` and credential proxies are explicit peers
+### Two app patterns — same middleware, different SDK behavior
 
-Earlier designs had JWT middleware as a hidden default. This was wrong — it
-gave the impression that auth happens automatically. Both patterns serve
-different app architectures and must be explicit choices in the yaml.
+Both data-owning and API-proxy apps use `user-identity` middleware (the
+default). The difference is what the SDK reads from `current_user`:
+
+**Data-owning** (echofit — food logs, notes):
+```python
+user = current_user.get()
+store = get_store()
+store.save(user.email, "daily/2026-04-10", entries)
+```
+
+**API-proxy** (some-third-party-api — wraps external API):
+```python
+user = current_user.get()
+token = user.profile["token"]
+resp = httpx.get("https://api.example.com/...",
+                 headers={"Authorization": f"Bearer {token}"})
+```
+
+**API-proxy with OAuth2 refresh** (gwsa — wraps Google APIs):
+```python
+user = current_user.get()
+creds = Credentials.from_authorized_user_info(user.profile)
+if creds.expired:
+    creds.refresh(Request())
+    get_store().update_profile(user.email, json.loads(creds.to_json()))
+service = build("gmail", "v1", credentials=creds)
+```
 
 ## Store Architecture
 
@@ -345,16 +344,35 @@ revoke_after).
 
 ### DataStoreAuthAdapter
 
-Bridges `UserDataStore` → `UserAuthStore`. Auth records stored under key
-`"auth"`. This lets filesystem-based apps use one store for both auth
-records and app data.
+Bridges `UserDataStore` → `UserAuthStore`. The full user record (auth
+fields + profile) is stored under one key per user. One store read gets
+everything — the verifier loads auth + profile together, sets
+`current_user` with the complete record.
 
 ### Why two protocols
 
 Auth doesn't know about app data. A MySQL app can implement
 `UserAuthStore` against its customers table without ever using
-`UserDataStore`. The bridge is optional convenience for simple filesystem
-apps.
+`UserDataStore`. The bridge is optional convenience for simple
+filesystem-based apps.
+
+### User record structure
+
+The adapter stores one record per user containing both auth fields and
+the app profile:
+
+```json
+{
+  "email": "alice@example.com",
+  "created": "2026-04-01T00:00:00",
+  "revoke_after": null,
+  "profile": {"token": "some-third-party-api-pat-xxx"}
+}
+```
+
+Auth fields (`email`, `created`, `revoke_after`) are managed by the
+framework. The `profile` field is opaque to mcp-app — the SDK interprets
+it. Both are loaded in one store read at auth time.
 
 ## Relationship to Other Packages
 
@@ -368,22 +386,19 @@ mcp-app doesn't know about gapp either. Solutions deploy anywhere as
 standard container images. gapp is one option — any container platform
 works.
 
-### app-user (superseded)
+### app-user (archived)
 
 `app-user` was the original standalone auth library. mcp-app absorbed all
-its code directly. The packages are byte-for-byte identical (different
-import paths). `app-user` is effectively dead and should be archived.
-
-Solutions should use `from mcp_app import ...` not `from app_user import
-...`.
+its code. The `app-user` repo is archived. Solutions use
+`from mcp_app import ...`.
 
 ### gapp_run (legacy)
 
-`gapp_run` is gapp's ASGI runtime wrapper that handles credential
-mediation for API-proxy solutions. It's legacy — the credential mediation
-code is being migrated into mcp-app as `bearer-proxy` and
-`google-oauth2-proxy` middleware (echomodel/mcp-app#8). Once complete,
-`gapp_run` reduces to health checks and dynamic app loading.
+`gapp_run` is gapp's ASGI runtime wrapper that handled credential
+mediation for API-proxy solutions. It's legacy — credential management
+moved to the SDK layer (profile on `current_user`, SDK handles token
+refresh). `gapp_run` remains for backward compatibility with solutions
+that haven't migrated to mcp-app.
 
 ## SDK-First Architecture
 
@@ -493,24 +508,19 @@ AdminClient → httpx → ASGI → Starlette → admin.py → FileSystemUserData
 
 ### stdio validation
 
-For stdio, register with an MCP client directly:
+Register with an MCP client directly:
 
 ```bash
-claude mcp add my-solution -- mcp-app stdio
+claude mcp add my-app -- mcp-app stdio
 ```
 
 Claude Code launches the process and manages its lifecycle. No background
 server, no port management, no cleanup. Call tools through the agent.
 
-Note: `mcp-app stdio` is not yet implemented (echomodel/mcp-app#4). Until
-then, solutions can use FastMCP directly for stdio validation:
+Use `--user` to select a specific user account for the session:
 
-```python
-# my_solution/__main__.py
-from mcp.server.fastmcp import FastMCP
-mcp = FastMCP("my-solution")
-# register tools manually with @mcp.tool() for stdio path
-mcp.run()
+```bash
+claude mcp add my-app -- mcp-app stdio --user alice@example.com
 ```
 
 ### What httpx ASGI transport validates

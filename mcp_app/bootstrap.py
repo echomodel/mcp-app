@@ -175,3 +175,37 @@ def build_app(config_path: Path | None = None):
     mcp = build_mcp(config)
     app = build_asgi(config, mcp, store)
     return app, mcp, store, config
+
+
+def run_stdio(config_path: Path | None = None, user: str | None = None):
+    """One-shot: build, load user, run stdio. Used by mcp-app stdio and app CLIs.
+
+    Args:
+        config_path: Path to mcp-app.yaml. None = read from cwd.
+        user: User identity. Overrides stdio.user from yaml.
+    """
+    import asyncio
+    import mcp_app
+    from mcp_app.context import current_user, hydrate_profile
+    from mcp_app.models import UserRecord
+    from mcp_app.bridge import DataStoreAuthAdapter
+
+    mcp, store, config = build_stdio(config_path)
+    mcp_app._store = store
+
+    user_id = user or config.get("stdio", {}).get("user")
+    if not user_id:
+        raise RuntimeError(
+            "No user specified. Use --user flag or configure stdio.user "
+            "in mcp-app.yaml:\n\n  stdio:\n    user: \"local\"\n"
+        )
+
+    adapter = DataStoreAuthAdapter(store)
+    user_record = asyncio.run(adapter.get_full(user_id))
+    if user_record:
+        user_record.profile = hydrate_profile(user_record.profile)
+    else:
+        user_record = UserRecord(email=user_id)
+
+    current_user.set(user_record)
+    mcp.run(transport="stdio")

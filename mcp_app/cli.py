@@ -296,27 +296,32 @@ def admin_tools():
     admin_mcp.run(transport="stdio")
 
 
-# --- App CLI factory ---
+# --- App CLI factories ---
 
-def create_app_cli(app_name: str) -> click.Group:
-    """Create a CLI for a specific app.
+def _find_app_config(app_name: str) -> Path | None:
+    """Find mcp-app.yaml bundled in an installed app package."""
+    import importlib
+    pkg = importlib.import_module(app_name.replace("-", "_"))
+    config_path = Path(pkg.__file__).parent / "mcp-app.yaml"
+    return config_path if config_path.exists() else None
 
-    Returns a Click group with all mcp-app commands, configured for
-    the given app name. The app's config is stored at
-    ~/.config/{app_name}/setup.json and the store defaults to
-    ~/.local/share/{app_name}/users/.
 
-    The users add command dynamically generates flags from the
-    registered profile model (if expand=True) or accepts --profile
-    for object input.
+def create_mcp_cli(app_name: str) -> click.Group:
+    """Create the MCP server CLI for an app (serve, stdio).
+
+    Usage in app's __init__.py:
+        mcp_cli = create_mcp_cli("my-app")
+
+    pyproject.toml:
+        [project.scripts]
+        my-app-mcp = "my_app:mcp_cli"
     """
-    from mcp_app.context import get_profile_model, get_profile_expand
 
     @click.group()
     def cli():
+        """MCP server commands."""
         pass
 
-    # Serve and stdio use the app's bundled config
     @cli.command()
     @click.option("--host", default="0.0.0.0")
     @click.option("--port", default=8080, type=int)
@@ -325,13 +330,7 @@ def create_app_cli(app_name: str) -> click.Group:
         import uvicorn
         from mcp_app.bootstrap import build_app
 
-        # Find config bundled with the installed package
-        import importlib
-        pkg = importlib.import_module(app_name.replace("-", "_"))
-        config_path = Path(pkg.__file__).parent / "mcp-app.yaml"
-        if not config_path.exists():
-            config_path = None
-
+        config_path = _find_app_config(app_name)
         app, mcp, store, config = build_app(config_path)
         import mcp_app
         mcp_app._store = store
@@ -341,56 +340,57 @@ def create_app_cli(app_name: str) -> click.Group:
     @click.option("--user", default=None, help="User identity for this session.")
     def stdio(user):
         """Run MCP server over stdio."""
-        from mcp_app.bootstrap import build_stdio
-        from mcp_app.context import current_user, hydrate_profile
-        from mcp_app.models import UserRecord
+        from mcp_app.bootstrap import run_stdio
+        config_path = _find_app_config(app_name)
+        try:
+            run_stdio(config_path=config_path, user=user)
+        except RuntimeError as e:
+            raise click.ClickException(str(e))
 
-        import importlib
-        pkg = importlib.import_module(app_name.replace("-", "_"))
-        config_path = Path(pkg.__file__).parent / "mcp-app.yaml"
-        if not config_path.exists():
-            config_path = None
+    return cli
 
-        mcp, store, config = build_stdio(config_path)
-        import mcp_app
-        mcp_app._store = store
 
-        user_id = user or config.get("stdio", {}).get("user")
-        if not user_id:
-            raise click.ClickException(
-                f"No user specified. Use --user flag or configure stdio.user "
-                f"in mcp-app.yaml."
-            )
+def create_admin_cli(app_name: str) -> click.Group:
+    """Create the admin CLI for an app (connect, users, tokens, health).
 
-        from mcp_app.bridge import DataStoreAuthAdapter
-        adapter = DataStoreAuthAdapter(store)
-        user_record = _run(adapter.get_full(user_id))
-        if user_record:
-            user_record.profile = hydrate_profile(user_record.profile)
-        else:
-            user_record = UserRecord(email=user_id)
+    Dynamically generates typed CLI flags from the registered profile
+    model (if expand=True) or accepts --profile for object input.
 
-        current_user.set(user_record)
-        mcp.run(transport="stdio")
+    Usage in app's __init__.py:
+        admin_cli = create_admin_cli("my-app")
 
-    # Setup
+    pyproject.toml:
+        [project.scripts]
+        my-app-admin = "my_app:admin_cli"
+    """
+    from mcp_app.context import get_profile_model, get_profile_expand
+
+    @click.group()
+    def cli():
+        """Admin commands — user management and health."""
+        pass
+
+    # Connect
     @cli.command()
-    @click.argument("url", required=False, default=None)
+    @click.argument("target")
     @click.option("--signing-key", default=None)
-    @click.option("--local", is_flag=True, help="Configure for local store access.")
-    def setup(url, signing_key, local):
-        """Configure connection to a deployed instance or local store."""
-        if local:
+    def connect(target, signing_key):
+        """Configure admin target. Use 'local' or a URL.
+
+        \b
+        Examples:
+          connect local
+          connect https://my-app.run.app --signing-key xxx
+        """
+        if target == "local":
             _save_setup({"mode": "local"}, app_name=app_name)
             click.echo(f"Configured {app_name} for local access.")
-        elif url:
-            data = {"mode": "remote", "url": url}
+        else:
+            data = {"mode": "remote", "url": target}
             if signing_key:
                 data["signing_key"] = signing_key
             _save_setup(data, app_name=app_name)
-            click.echo(f"Configured {app_name}: {url}")
-        else:
-            raise click.ClickException("Provide a URL or --local.")
+            click.echo(f"Configured {app_name}: {target}")
 
     # Health
     @cli.command()
@@ -401,8 +401,11 @@ def create_app_cli(app_name: str) -> click.Group:
         if cfg.get("mode") == "local":
             click.echo("Local mode — no remote health check.")
             return
-        resolved_url = _resolve_url(None, app_name)
-        client = AdminClient(resolved_url, "unused")
+        if not cfg.get("url"):
+            raise click.ClickException(
+                f"Not configured. Run: {app_name}-admin connect <url> --signing-key xxx"
+            )
+        client = AdminClient(cfg["url"], "unused")
         result = _run(client.health_check())
         click.echo(f"{result['status']} ({result['status_code']})")
 
@@ -416,6 +419,10 @@ def create_app_cli(app_name: str) -> click.Group:
     def users_list():
         """List registered users."""
         cfg = _load_setup(app_name)
+        if not cfg:
+            raise click.ClickException(
+                f"Not configured. Run: {app_name}-admin connect local"
+            )
         if cfg.get("mode") == "local":
             from mcp_app.data_store import FileSystemUserDataStore
             store = FileSystemUserDataStore(app_name=app_name)
@@ -434,14 +441,13 @@ def create_app_cli(app_name: str) -> click.Group:
                 status = " (revoked)" if user.get("revoke_after") else ""
                 click.echo(f"  {user['email']}{status}")
 
-    # Build the users add command dynamically based on profile model
+    # Build users add dynamically from profile model
     model = get_profile_model()
     expand = get_profile_expand()
 
     add_params = [click.Argument(["email"])]
 
     if model and expand:
-        # Generate flags from Pydantic model fields
         for field_name, field_info in model.model_fields.items():
             required = field_info.is_required()
             flag_name = f"--{field_name.replace('_', '-')}"
@@ -451,7 +457,6 @@ def create_app_cli(app_name: str) -> click.Group:
                 help=field_info.description or "",
             ))
     else:
-        # Accept profile as JSON or @file
         help_text = "Profile as JSON string or @file."
         if model:
             help_text += "\n" + _profile_help_text()
@@ -466,12 +471,16 @@ def create_app_cli(app_name: str) -> click.Group:
     def users_add(ctx, **kwargs):
         """Register a user."""
         email = kwargs.pop("email")
+        cfg = _load_setup(app_name)
+        if not cfg:
+            raise click.ClickException(
+                f"Not configured. Run: {app_name}-admin connect local"
+            )
 
         # Resolve profile
         profile = None
         if model and expand:
-            data = {k: v for k, v in kwargs.items() if v is not None
-                    and k not in ("url", "signing_key")}
+            data = {k: v for k, v in kwargs.items() if v is not None}
             if data:
                 profile = _validate_profile(data)
         elif "profile" in kwargs and kwargs["profile"]:
@@ -479,7 +488,6 @@ def create_app_cli(app_name: str) -> click.Group:
             if profile:
                 profile = _validate_profile(profile)
 
-        cfg = _load_setup(app_name)
         if cfg.get("mode") == "local":
             from datetime import datetime, timezone
             from mcp_app.data_store import FileSystemUserDataStore
@@ -503,6 +511,10 @@ def create_app_cli(app_name: str) -> click.Group:
     def users_revoke(email):
         """Revoke a user's access."""
         cfg = _load_setup(app_name)
+        if not cfg:
+            raise click.ClickException(
+                f"Not configured. Run: {app_name}-admin connect local"
+            )
         if cfg.get("mode") == "local":
             from mcp_app.data_store import FileSystemUserDataStore
             from mcp_app.bridge import DataStoreAuthAdapter
@@ -525,8 +537,12 @@ def create_app_cli(app_name: str) -> click.Group:
     def tokens_create(email):
         """Create a new token for an existing user."""
         cfg = _load_setup(app_name)
+        if not cfg:
+            raise click.ClickException(
+                f"Not configured. Run: {app_name}-admin connect <url>"
+            )
         if cfg.get("mode") == "local":
-            click.echo("Tokens are for remote instances only. Local mode uses stdio.user.")
+            click.echo("Tokens are for remote instances only.")
         else:
             result = _run(_client(None, None, app_name).create_token(email))
             click.echo(f"Token for {result['email']}: {result['token']}")
