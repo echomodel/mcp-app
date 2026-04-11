@@ -27,13 +27,11 @@ tools that the AI agent orchestrates externally.
 
 ### cwd is never used for deploy or admin
 
-`mcp-app serve` and `mcp-app build` read `mcp-app.yaml` from the current
-directory — you're the solution developer working in your repo.
-
-All other commands ignore the current directory entirely. Deploy reads from
-fleet source refs. Admin commands talk to a remote URL. The operator's cwd
-is irrelevant and must never influence behavior. This is a hard rule, not
-a default.
+App-specific CLIs (`my-app-mcp serve`, `my-app-admin`) get their config
+from Python args — they work from any directory. The `mcp-app` generic
+CLI is for remote admin (setup, users, health) when you don't have the
+app's own admin CLI installed locally. No command depends on the current
+working directory.
 
 ### Config vs problem-domain resources
 
@@ -184,7 +182,7 @@ HTTP mode. Missing or empty raises `RuntimeError` at startup.
 ### stdio identity comes from --user, not yaml
 
 `mcp-app stdio --user local` specifies the user identity. There is
-no `stdio.user` field in `mcp-app.yaml`. Identity is a runtime
+no config file for stdio identity. Identity is a runtime
 argument, not a versioned config setting — putting it in yaml would
 mean committing user choices to version control.
 
@@ -199,19 +197,17 @@ discovery, middleware, auth, admin endpoints, data stores, and serving.
 
 Tools are plain async functions. Docstrings become MCP tool descriptions.
 Type hints become tool schemas. No `@mcp.tool()` decorators. The framework
-discovers and registers tools automatically from the module declared in
-`mcp-app.yaml`.
+discovers and registers tools automatically from the module passed to
+`create_mcp_cli`.
 
-How this works: `bootstrap.py` imports the tools module, finds all public
+How this works: bootstrap receives the tools module, finds all public
 async functions via `inspect`, and calls `mcp.tool()(func)` on each one.
 The decorator still runs — mcp-app just calls it for you so your tools
 module has no framework coupling.
 
 ### What mcp-app provides
 
-- `mcp-app.yaml` config format and parser
-- `mcp-app serve` CLI (HTTP mode)
-- `mcp-app stdio` CLI (local mode)
+- `create_mcp_cli()` / `create_admin_cli()` CLI factories
 - `create_app_cli()` factory for app-specific CLIs with typed profile flags
 - Tool discovery from module path (public async functions)
 - Store abstraction (`filesystem` built-in, custom via module path)
@@ -295,9 +291,8 @@ Users register with: `claude mcp add my-solution -- my-solution-mcp`
 
 ## Tool Discovery
 
-The `tools` field in `mcp-app.yaml` is a Python module path. At startup,
-mcp-app imports that module and registers every public async function as
-an MCP tool:
+The tools module is a Python module passed to `create_mcp_cli`. All
+public async functions in it are registered as MCP tools:
 
 ```python
 # my_solution/mcp/tools.py
@@ -317,32 +312,8 @@ async def do_thing(param: str) -> dict:
 - Sync functions are skipped (only async)
 
 This is the mechanism that eliminates `@mcp.tool()` decorators. The
-decorator still runs internally — `bootstrap.py` calls `mcp.tool()(func)`
+decorator still runs internally — bootstrap calls `mcp.tool()(func)`
 for each discovered function.
-
-## mcp-app.yaml Reference
-
-```yaml
-name: my-solution           # Required — server name, store paths
-tools: my_solution.mcp.tools  # Required — module path for tool discovery
-store: filesystem            # Optional — default: filesystem
-middleware:                  # Optional — omit for no auth
-  - user-identity
-```
-
-| Field | Required | Default | Purpose |
-|-------|----------|---------|---------|
-| `name` | Yes | — | MCP server name, data store paths, XDG directory naming |
-| `tools` | Yes | — | Python module path. All public async functions become tools. |
-| `store` | No | `filesystem` | Data store backend. `filesystem` = per-user JSON under XDG. Dotted module path = custom backend. |
-| `middleware` | No | none | Array of middleware aliases or module paths. |
-
-### Resolution rules
-
-- No dot in value → built-in alias (`filesystem`, `user-identity`)
-- Dot in value → Python module path, dynamically imported
-
-This applies to `store` and `middleware` entries.
 
 ## Middleware and Identity
 
@@ -494,12 +465,9 @@ it. Both are loaded in one store read at auth time.
 gapp deploys containers to Cloud Run. It doesn't know about mcp-app's
 internals. mcp-app doesn't know about gapp. Neither imports the other.
 
-gapp has three ways to determine how to run an app (priority order):
-1. `service.entrypoint` in gapp.yaml — ASGI module:app path, wrapped
-   with uvicorn. Used by FastMCP apps without mcp-app.
-2. `service.cmd` in gapp.yaml — raw command, runs as written.
-3. `mcp-app.yaml` detected in repo — generates Dockerfile with
-   `CMD ["mcp-app", "serve"]`. Zero config for mcp-app solutions.
+gapp config for how to run the app:
+- `service.cmd: my-app-mcp serve` — for mcp-app solutions
+- `service.entrypoint: my_app.mcp.server:app` — for raw FastMCP/uvicorn
 
 See the deployment matrix in README.md for all deployment options
 (bare metal, Docker, gcloud --source, gapp) with both mcp-app and
@@ -547,8 +515,8 @@ transport = httpx.ASGITransport(app=app)
 client = httpx.AsyncClient(transport=transport, base_url="http://test")
 ```
 
-`build_app()` reads `mcp-app.yaml` and returns the complete ASGI app —
-same object that `mcp-app serve` gives to uvicorn. Giving it to httpx
+`build_asgi()` returns the complete ASGI app — same object that
+`my-app-mcp serve` gives to uvicorn. Giving it to httpx
 instead means the full stack runs in-process: tool discovery, middleware,
 admin endpoints, store wiring. No server process, no port binding, no
 cleanup.
@@ -645,7 +613,7 @@ claude mcp add my-app -- mcp-app stdio --user alice@example.com
 ### What httpx ASGI transport validates
 
 Everything that matters for deployment readiness:
-- Tool discovery from `mcp-app.yaml`
+- Tool discovery from the tools module
 - Middleware auth (JWT validation, user identity)
 - Admin endpoints (user registration, listing, tokens)
 - Store wiring (per-user data, auth records)

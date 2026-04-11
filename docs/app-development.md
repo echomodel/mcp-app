@@ -129,24 +129,25 @@ same interface regardless of mode.
 
 ## Running the MCP Server
 
-### Development (from repo directory)
+### Development (from venv)
 
 ```bash
-mcp-app serve                      # HTTP on port 8080
-mcp-app stdio --user local         # stdio
+pip install -e .
+my-app-mcp serve                   # HTTP on port 8080
+my-app-mcp stdio --user local      # stdio
 ```
-
-Reads `mcp-app.yaml` from the current directory.
 
 ### Installed app (from anywhere)
 
 ```bash
+pipx install my-app
 my-app-mcp serve                   # HTTP
 my-app-mcp stdio --user local      # stdio
 my-app-mcp stdio --user alice      # different user
 ```
 
-Finds bundled `mcp-app.yaml` from the installed package.
+No config files — the app name and tools module are wired in
+Python via `create_mcp_cli`. Works from any directory.
 
 ### Registering with MCP clients
 

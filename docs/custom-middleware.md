@@ -4,7 +4,7 @@ Identity middleware (`user-identity`) runs automatically in HTTP mode.
 Most apps never need to configure middleware.
 
 For advanced use cases, you can add custom ASGI middleware or disable
-auth entirely by adding a `middleware` field to `mcp-app.yaml`:
+auth entirely by passing a `middleware` list to `create_mcp_cli` or `build_asgi`:
 
 ```yaml
 # Custom middleware alongside identity

@@ -1,6 +1,6 @@
 # mcp-app
 
-Config-driven framework for building and running MCP servers as HTTP services. Define tools as pure Python functions, configure via YAML, run with two commands.
+Framework for building and running MCP servers as HTTP services. Define tools as pure Python functions, wire up with two lines, run with one command.
 
 ## Install
 
@@ -9,13 +9,6 @@ pip install git+https://github.com/echomodel/mcp-app.git
 ```
 
 ## Quick Start
-
-Create `mcp-app.yaml` in your repo root:
-
-```yaml
-name: my-app
-tools: my_app.mcp.tools
-```
 
 Create your tools module — pure async functions, no framework imports:
 
@@ -30,34 +23,39 @@ async def do_thing(param: str) -> dict:
     return sdk.do_thing(param)
 ```
 
-Run locally or as HTTP service:
+Wire up in `__init__.py`:
+
+```python
+# my_app/__init__.py
+from mcp_app.cli import create_mcp_cli, create_admin_cli
+
+mcp_cli = create_mcp_cli("my-app")
+admin_cli = create_admin_cli("my-app")
+```
+
+Add entry points to `pyproject.toml`:
+
+```toml
+[project.scripts]
+my-app-mcp = "my_app:mcp_cli"
+my-app-admin = "my_app:admin_cli"
+```
+
+Run:
 
 ```bash
-mcp-app stdio   # local, single user, stdin/stdout
-mcp-app serve   # HTTP, multi-user, production
+my-app-mcp serve                   # HTTP, multi-user
+my-app-mcp stdio --user local      # stdio, single user
 ```
 
-## mcp-app.yaml Reference
-
-```yaml
-name: my-app                    # Required — MCP server name, data store path
-tools: my_app.mcp.tools         # Required — module path to discover tools from
-store: filesystem               # Optional — defaults to filesystem
-```
-
-Only `name` and `tools` are required. Identity middleware runs
-automatically in HTTP mode. Store defaults to filesystem. stdio
-user identity is specified via the `--user` flag on the CLI, not
-in the yaml.
+No config files. Tool discovery, identity middleware, admin endpoints,
+and store wiring are handled by the framework from the Python args.
 
 ### Store
 
-| Value | Description |
-|-------|-------------|
-| `filesystem` | Default. Per-user directories with `~` email encoding. Reads `APP_USERS_PATH` env var, falls back to `~/.local/share/{name}/users/` |
-| `my.module.MyStore` | Custom. Any class satisfying the `UserDataStore` protocol (`load`, `save`, `list_users`, `delete`) |
-
-No dot = built-in alias. Dot = Python module path, dynamically imported.
+Default store is filesystem — per-user directories under
+`~/.local/share/{name}/users/`. Override with `APP_USERS_PATH`
+env var. Custom store backends can be passed to `create_mcp_cli`.
 
 ### Middleware
 
@@ -106,7 +104,7 @@ class MySDK:
 
 The SDK reads `current_user.get().profile` for the backend credential. The profile was saved at registration time and loaded in one read with the auth record.
 
-**What's identical:** store setup, admin endpoints, tool discovery, yaml structure, deployment. The middleware is the same. The SDK decides what to read from the user context.
+**What's identical:** store setup, admin endpoints, tool discovery, deployment. The middleware is the same. The SDK decides what to read from the user context.
 
 ### Tool Discovery
 
@@ -127,8 +125,8 @@ Every mcp-app solution has a `current_user` ContextVar set before tools execute.
 
 | Transport | How it's set |
 |-----------|-------------|
-| HTTP (`mcp-app serve`) | Identity middleware validates JWT, loads full user record from store |
-| stdio (`mcp-app stdio`) | CLI loads user record from store using `--user` flag |
+| HTTP (`my-app-mcp serve`) | Identity middleware validates JWT, loads full user record from store |
+| stdio (`my-app-mcp stdio`) | CLI loads user record from store using `--user` flag |
 
 The SDK reads it:
 
@@ -197,16 +195,17 @@ Gated by admin-scoped JWT (`scope: "admin"`, same signing key).
 Validate the full stack in-memory — no server, no Docker, no cloud:
 
 ```python
-from mcp_app.bootstrap import build_app
+from mcp_app.bootstrap import build_asgi
+from my_app.mcp import tools
 import httpx
 
-app, mcp, store, config = build_app()
+app, mcp, store = build_asgi("my-app", tools)
 transport = httpx.ASGITransport(app=app)
 client = httpx.AsyncClient(transport=transport, base_url="http://test")
 ```
 
-`build_app()` returns the same ASGI app that `mcp-app serve` gives to
-uvicorn. httpx runs it in-process. If it works here, it works in Docker.
+`build_asgi()` returns the same ASGI app the CLI gives to uvicorn.
+httpx runs it in-process. If it works here, it works in Docker.
 httpx is already a dependency of mcp-app.
 
 See CONTRIBUTING.md for full test examples.
@@ -219,7 +218,7 @@ mcp-app is a standard Python app. Deploy it however you deploy Python.
 
 ```bash
 pip install -e .
-SIGNING_KEY=your-key mcp-app serve
+SIGNING_KEY=your-key my-app-mcp serve
 ```
 
 For development or simple VPS deployments. Runs uvicorn on port 8080.
@@ -232,7 +231,7 @@ WORKDIR /app
 COPY . /app
 RUN pip install -e .
 EXPOSE 8080
-CMD ["mcp-app", "serve"]
+CMD ["my-app-mcp", "serve"]
 ```
 
 ```bash
@@ -257,8 +256,8 @@ exists it uses it; otherwise Google Cloud Buildpacks detect the Python app.
 
 ### gapp (fastest path to Cloud Run)
 
-[gapp](https://github.com/echomodel/gapp) auto-detects `mcp-app.yaml`
-and handles Dockerfile generation, secrets, and data volumes:
+[gapp](https://github.com/echomodel/gapp) handles Dockerfile generation,
+secrets, and data volumes:
 
 ```yaml
 # gapp.yaml
@@ -275,16 +274,15 @@ env:
 gapp deploy
 ```
 
-No Dockerfile to write. gapp generates one with `CMD ["mcp-app", "serve"]`.
+No Dockerfile to write.
 
-gapp has three ways to know how to run your app (in priority order):
-1. `service.entrypoint` in gapp.yaml — ASGI module:app path, wrapped with uvicorn
-2. `service.cmd` in gapp.yaml — raw command, runs as written
-3. `mcp-app.yaml` detected in repo — generates `CMD ["mcp-app", "serve"]`
+gapp config options:
+- `service.entrypoint` — ASGI module:app path, wrapped with uvicorn
+- `service.cmd` — raw command (e.g., `my-app-mcp serve`)
 
 ### FastMCP without mcp-app
 
-If using FastMCP directly (no mcp-app.yaml), the same deployment options
+If using FastMCP directly, the same deployment options
 work. The Dockerfile CMD and gapp config differ:
 
 ```dockerfile
@@ -307,7 +305,7 @@ uvicorn my_app.mcp.server:app --host 0.0.0.0 --port 8080
 
 | | Bare metal | Docker | gcloud --source | gapp |
 |---|---|---|---|---|
-| **mcp-app** | `mcp-app serve` | `CMD ["mcp-app", "serve"]` | auto-detected | auto-detected |
+| **mcp-app** | `my-app-mcp serve` | `CMD ["my-app-mcp", "serve"]` | needs Dockerfile | `service.cmd` |
 | **FastMCP** | `uvicorn module:app` | `CMD ["uvicorn", "..."]` | needs Dockerfile | `service.entrypoint` |
 
 mcp-app doesn't know about gapp. gapp doesn't know about mcp-app's internals.
@@ -319,7 +317,7 @@ Deploy anywhere — the framework serves an ASGI app on a port.
 
 **Claude Code (stdio — local):**
 ```bash
-claude mcp add my-app -- mcp-app stdio
+claude mcp add my-app -- my-app-mcp stdio --user local
 ```
 
 **Claude Code (HTTP — remote):**
@@ -331,7 +329,7 @@ claude mcp add --transport http my-app \
 
 **Gemini CLI (stdio — local):**
 ```bash
-gemini mcp add my-app -- mcp-app stdio
+gemini mcp add my-app -- my-app-mcp stdio --user local
 ```
 
 #### Manual configuration (JSON)
@@ -367,13 +365,12 @@ configuration for each.
 mcp-app wraps [FastMCP](https://github.com/modelcontextprotocol/python-sdk) (the official MCP Python SDK) and [Starlette](https://www.starlette.io/) (ASGI framework). Solutions never import these directly — mcp-app handles all wiring.
 
 ```
-mcp-app.yaml
-    → bootstrap reads config
-    → imports tools module, discovers async functions
+create_mcp_cli("my-app", tools_module=tools)
+    → discovers async functions in tools module
     → registers each as FastMCP tool (with identity enforcement)
-    → creates data store from config
-    → HTTP: wraps with identity middleware + admin endpoints → uvicorn
-    → stdio: loads user record from store → FastMCP over stdin/stdout
+    → creates data store from app name
+    → HTTP (serve): wraps with identity middleware + admin endpoints → uvicorn
+    → stdio (--user): loads user record from store → FastMCP over stdin/stdout
 ```
 
 ## Further Reading
