@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fixture-app"
+version = "0.0.1"
+dependencies = ["mcp-app"]
+
+[project.scripts]
+fixture-app-mcp = "fixture_app:app.mcp_cli"
+fixture-app-admin = "fixture_app:app.admin_cli"
+
+[tool.setuptools.packages.find]
+include = ["fixture_app*"]

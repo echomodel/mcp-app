@@ -6,12 +6,11 @@ CLI wiring, and tool protocol compliance all work for that app.
 
 The test modules in test_framework.py are identical across every
 mcp-app solution — they import from mcp_app.testing.iam, .wiring,
-.tools, .http. THIS FILE is the only thing that changes: it tells
+.tools, .health. THIS FILE is the only thing that changes: it tells
 the tests which app to run against.
 
-Here in the mcp-app repo, it points at a minimal fake app (fixture_app)
-to prove the test modules themselves work. In a real app like echofit,
-it points at the real App object:
+Here in the mcp-app repo, it points at a minimal fixture app. In a
+real app like echofit, it points at the real App object:
 
     import pytest
     from my_app_mcp import app as my_app
@@ -22,13 +21,9 @@ it points at the real App object:
 """
 
 import pytest
-from tests.framework.fixture_app import tools
-from mcp_app.app import App
+from fixture_app import app as fixture_app
 
 
 @pytest.fixture(scope="session")
 def app():
-    return App(
-        name="fixture-app",
-        tools_module=tools,
-    )
+    return fixture_app
