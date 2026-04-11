@@ -375,3 +375,9 @@ mcp-app.yaml
     → HTTP: wraps with identity middleware + admin endpoints → uvicorn
     → stdio: loads user record from store → FastMCP over stdin/stdout
 ```
+
+## Further Reading
+
+- [docs/app-development.md](docs/app-development.md) — CLI factories, entry points, user management workflow, profile registration
+- [docs/custom-middleware.md](docs/custom-middleware.md) — advanced middleware configuration
+- [CONTRIBUTING.md](CONTRIBUTING.md) — architecture, design decisions, testing
