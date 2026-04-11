@@ -378,13 +378,19 @@ it. Both are loaded in one store read at auth time.
 
 ### gapp (deployment)
 
-gapp deploys containers. It doesn't know about mcp-app's internals. If a
-repo has `mcp-app.yaml`, gapp auto-detects it and generates a Dockerfile
-with `CMD ["mcp-app", "serve"]`. No `service.entrypoint` needed.
+gapp deploys containers to Cloud Run. It doesn't know about mcp-app's
+internals. mcp-app doesn't know about gapp. Neither imports the other.
 
-mcp-app doesn't know about gapp either. Solutions deploy anywhere as
-standard container images. gapp is one option — any container platform
-works.
+gapp has three ways to determine how to run an app (priority order):
+1. `service.entrypoint` in gapp.yaml — ASGI module:app path, wrapped
+   with uvicorn. Used by FastMCP apps without mcp-app.
+2. `service.cmd` in gapp.yaml — raw command, runs as written.
+3. `mcp-app.yaml` detected in repo — generates Dockerfile with
+   `CMD ["mcp-app", "serve"]`. Zero config for mcp-app solutions.
+
+See the deployment matrix in README.md for all deployment options
+(bare metal, Docker, gcloud --source, gapp) with both mcp-app and
+FastMCP.
 
 ### app-user (archived)
 

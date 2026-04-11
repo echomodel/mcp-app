@@ -198,26 +198,39 @@ REST admin endpoints are mounted at `/admin` in HTTP mode:
 
 Gated by admin-scoped JWT (`scope: "admin"`, same signing key).
 
-## Deployment
+## Local Testing
 
-### With gapp
+Validate the full stack in-memory — no server, no Docker, no cloud:
 
-[gapp](https://github.com/echomodel/gapp) detects `mcp-app.yaml` automatically. No `service.entrypoint` needed in `gapp.yaml`:
+```python
+from mcp_app.bootstrap import build_app
+import httpx
 
-```yaml
-# gapp.yaml — just env vars and public access
-public: true
-env:
-  - name: SIGNING_KEY
-    secret:
-      generate: true
-  - name: APP_USERS_PATH
-    value: "{{SOLUTION_DATA_PATH}}/users"
+app, mcp, store, config = build_app()
+transport = httpx.ASGITransport(app=app)
+client = httpx.AsyncClient(transport=transport, base_url="http://test")
 ```
 
-### Without gapp
+`build_app()` returns the same ASGI app that `mcp-app serve` gives to
+uvicorn. httpx runs it in-process. If it works here, it works in Docker.
+httpx is already a dependency of mcp-app.
 
-Any platform that runs Python apps:
+See CONTRIBUTING.md for full test examples.
+
+## Deployment
+
+mcp-app is a standard Python app. Deploy it however you deploy Python.
+
+### Bare metal (no container)
+
+```bash
+pip install -e .
+SIGNING_KEY=your-key mcp-app serve
+```
+
+For development or simple VPS deployments. Runs uvicorn on port 8080.
+
+### Docker (any container platform)
 
 ```dockerfile
 FROM python:3.11-slim
@@ -228,7 +241,83 @@ EXPOSE 8080
 CMD ["mcp-app", "serve"]
 ```
 
-Set `SIGNING_KEY` environment variable.
+```bash
+# Build and run locally
+docker build -t my-app .
+docker run -p 8080:8080 -e SIGNING_KEY=your-key my-app
+```
+
+This Dockerfile works on any platform that runs containers.
+
+### Google Cloud Run (source deploy — no Docker needed)
+
+```bash
+gcloud run deploy my-app \
+  --source . \
+  --allow-unauthenticated \
+  --set-env-vars SIGNING_KEY=your-key
+```
+
+Builds in the cloud. No local Docker install required. If a Dockerfile
+exists it uses it; otherwise Google Cloud Buildpacks detect the Python app.
+
+### gapp (fastest path to Cloud Run)
+
+[gapp](https://github.com/echomodel/gapp) auto-detects `mcp-app.yaml`
+and handles Dockerfile generation, secrets, and data volumes:
+
+```yaml
+# gapp.yaml
+public: true
+env:
+  - name: SIGNING_KEY
+    secret:
+      generate: true
+  - name: APP_USERS_PATH
+    value: "{{SOLUTION_DATA_PATH}}/users"
+```
+
+```bash
+gapp deploy
+```
+
+No Dockerfile to write. gapp generates one with `CMD ["mcp-app", "serve"]`.
+
+gapp has three ways to know how to run your app (in priority order):
+1. `service.entrypoint` in gapp.yaml — ASGI module:app path, wrapped with uvicorn
+2. `service.cmd` in gapp.yaml — raw command, runs as written
+3. `mcp-app.yaml` detected in repo — generates `CMD ["mcp-app", "serve"]`
+
+### FastMCP without mcp-app
+
+If using FastMCP directly (no mcp-app.yaml), the same deployment options
+work. The Dockerfile CMD and gapp config differ:
+
+```dockerfile
+# Dockerfile for FastMCP
+CMD ["uvicorn", "my_app.mcp.server:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+```yaml
+# gapp.yaml for FastMCP
+service:
+  entrypoint: my_app.mcp.server:app
+```
+
+```bash
+# Bare metal for FastMCP
+uvicorn my_app.mcp.server:app --host 0.0.0.0 --port 8080
+```
+
+### Deployment matrix
+
+| | Bare metal | Docker | gcloud --source | gapp |
+|---|---|---|---|---|
+| **mcp-app** | `mcp-app serve` | `CMD ["mcp-app", "serve"]` | auto-detected | auto-detected |
+| **FastMCP** | `uvicorn module:app` | `CMD ["uvicorn", "..."]` | needs Dockerfile | `service.entrypoint` |
+
+mcp-app doesn't know about gapp. gapp doesn't know about mcp-app's internals.
+Deploy anywhere — the framework serves an ASGI app on a port.
 
 ### MCP Client Configuration
 
