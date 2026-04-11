@@ -1,5 +1,28 @@
 # Contributing to mcp-app
 
+## Terminology: the test suite mcp-app ships
+
+mcp-app ships reusable test modules (`mcp_app.testing`) that any
+implementing app imports and runs against itself to check auth, user
+admin, JWT enforcement, CLI wiring, and tool protocol compliance.
+
+**In user-facing prose, lead with the value:** "free tests that check
+auth and user admin work for your app." Don't lead with jargon. The
+formal industry term is "conformance suite" (also called "compliance
+suite" or "TCK" — Test Compatibility Kit). Use these terms
+parenthetically at most, never as the primary label. The test modules
+are organized by what they check (`iam/`, `wiring/`, `tools/`,
+`health/`), not by abstract testing methodology.
+
+**Avoid:** "contract tests" (implies Pact-style consumer-driven
+testing, which this is not), "verification tests" (redundant — all
+tests verify), "framework tests" (sounds like it tests the framework
+rather than the app).
+
+**Prefer:** "tests from mcp-app that check [specific thing]" or
+"free tests for auth and admin" or just reference the subsystem
+package name directly.
+
 ## Architectural Decisions
 
 ### Agent-composed over provider-coupled (admin tools)

@@ -6,7 +6,7 @@ mcp-app evolves from a framework for building individual MCP servers into the fu
 
 | Layer | Where it lives | Who owns it |
 |-------|---------------|-------------|
-| **App definition** | `mcp-app.yaml` in solution repo | Solution author |
+| **App definition** | `App` object in solution package | Solution author |
 | **Fleet manifest** | `fleet.yaml` in a git repo | Operator |
 | **Deploy provider** | pip-installable package | Anyone |
 
@@ -14,14 +14,18 @@ mcp-app evolves from a framework for building individual MCP servers into the fu
 
 A solution repo contains only the app definition. No deploy config, no provider references, no coupling to any cloud:
 
-```yaml
-# mcp-app.yaml
-name: echofit
-tools: echofit.mcp.tools
-store: filesystem
-middleware:
-  - user-identity
+```python
+# echofit_mcp/__init__.py
+from mcp_app import App
+from echofit_mcp.diet import tools
+
+app = App(name="echofit", tools_module=tools)
 ```
+
+> **Note:** This design doc predates the removal of `mcp-app.yaml`.
+> App configuration is now via Python args (`App` class), not yaml.
+> Some sections below still reference the old yaml pattern and need
+> updating when fleet is implemented.
 
 ## Fleets
 
@@ -305,8 +309,8 @@ to authenticate.
 
 ### cwd is never used for deploy or admin
 
-`mcp-app serve` and `mcp-app build` read `mcp-app.yaml` from the current
-directory — you're the solution developer working in your repo.
+App-specific CLIs (`my-app-mcp serve`) get their config from the `App`
+object in Python — no file discovery, no cwd dependency.
 
 All other commands ignore the current directory entirely. Deploy reads from
 the fleet's source refs. Admin commands talk to a remote URL. The operator's
@@ -377,13 +381,11 @@ a personal fleet, and a local dev fleet.
 
 Jim wrote one app himself. The others are open source or third-party:
 
-```yaml
-# jim/sales-tools/mcp-app.yaml — Jim's own app
-name: sales-tools
-tools: sales_tools.mcp.tools
-store: filesystem
-middleware:
-  - user-identity
+```python
+# jim/sales-tools/sales_tools_mcp/__init__.py
+from mcp_app import App
+from sales_tools_mcp import tools
+app = App(name="sales-tools", tools_module=tools)
 ```
 
 He also uses `echomodel/echofit` (open source), a commercial MCP service from
@@ -559,7 +561,7 @@ mcp-app users add --app echofit-dev user@example.com
 
 | Person | What they publish | What they configure |
 |--------|------------------|-------------------|
-| **Solution author** (echomodel, Jim, Acme) | `mcp-app.yaml` in their repo, or a container image | Nothing deployment-related |
+| **Solution author** (echomodel, Jim, Acme) | `App` object in their package, or a container image | Nothing deployment-related |
 | **Provider author** (echomodel, Bob, HackerHost) | pip package with entry point | Nothing fleet-related |
 | **Operator** (Jim) | fleet.yaml per fleet + CI workflow | Provider config, solution list |
 

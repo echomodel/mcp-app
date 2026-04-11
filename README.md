@@ -373,6 +373,14 @@ create_mcp_cli("my-app", tools_module=tools)
     → stdio (--user): loads user record from store → FastMCP over stdin/stdout
 ```
 
+## Free Tests for Your App
+
+mcp-app ships reusable test modules that check auth, user admin,
+JWT enforcement, CLI wiring, and tool protocol compliance against
+your specific app. Import them in two files, provide your `App`
+object as a fixture, and get 25+ tests for free. See
+[docs/app-development.md](docs/app-development.md) for setup.
+
 ## Further Reading
 
 - [docs/app-development.md](docs/app-development.md) — CLI factories, entry points, user management workflow, profile registration
