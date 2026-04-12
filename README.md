@@ -358,8 +358,12 @@ Any deployment environment must provide:
   for any durable deployment. The default writes to the local
   filesystem, which is ephemeral in containers (see Environment
   Variables above)
+- **MCP endpoint:** `/` (root path). MCP clients connect to
+  `https://host:port/`, not `/mcp`
 - **Health check:** `GET /health` — no auth, returns
   `{"status": "ok"}`
+- **Admin API:** `/admin/users` (POST, GET),
+  `/admin/users/{email}` (DELETE), `/admin/tokens` (POST)
 - **Auth model:** mcp-app handles its own auth via JWT. If the
   platform has an auth gate (IAM, API gateway, etc.), configure
   it to allow unauthenticated traffic through to the app
