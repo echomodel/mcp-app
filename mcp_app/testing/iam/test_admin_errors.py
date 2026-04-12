@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from mcp_app.testing.fixtures import profile_flags
+
 
 @pytest.fixture
 def admin_env(app, tmp_path):
@@ -33,19 +35,19 @@ def _run(binary, args, env):
     )
 
 
-def test_users_add_without_connect_fails(admin_env):
+def test_users_add_without_connect_fails(app, admin_env):
     binary, env = admin_env
-    result = _run(binary, ["users", "add", "alice@example.com"], env)
+    result = _run(binary, ["users", "add", "alice@example.com"] + profile_flags(app), env)
     assert result.returncode != 0
 
 
-def test_connect_url_without_signing_key_succeeds_but_users_fails(admin_env):
+def test_connect_url_without_signing_key_succeeds_but_users_fails(app, admin_env):
     """connect <url> without --signing-key saves config but users add fails."""
     binary, env = admin_env
     connect = _run(binary, ["connect", "https://fake.example.com"], env)
     assert connect.returncode == 0
 
-    add = _run(binary, ["users", "add", "alice@example.com"], env)
+    add = _run(binary, ["users", "add", "alice@example.com"] + profile_flags(app), env)
     assert add.returncode != 0
 
 

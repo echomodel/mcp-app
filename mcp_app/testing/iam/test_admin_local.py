@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_app.testing.fixtures import mcp_binary, admin_binary
+from mcp_app.testing.fixtures import mcp_binary, admin_binary, profile_flags
 
 
 @pytest.fixture
@@ -45,26 +45,26 @@ def test_connect_local(local_env):
     assert "local" in result.stdout.lower()
 
 
-def test_users_add_locally(local_env):
+def test_users_add_locally(app, local_env):
     binary, env, tmp_path = local_env
     _run(binary, ["connect", "local"], env)
-    result = _run(binary, ["users", "add", "alice@example.com"], env)
+    result = _run(binary, ["users", "add", "alice@example.com"] + profile_flags(app), env)
     assert result.returncode == 0
     assert "alice@example.com" in result.stdout
 
 
-def test_users_list_locally(local_env):
+def test_users_list_locally(app, local_env):
     binary, env, _ = local_env
     _run(binary, ["connect", "local"], env)
-    _run(binary, ["users", "add", "alice@example.com"], env)
+    _run(binary, ["users", "add", "alice@example.com"] + profile_flags(app), env)
     result = _run(binary, ["users", "list"], env)
     assert result.returncode == 0
     assert "alice@example.com" in result.stdout
 
 
-def test_users_add_without_connect_fails(local_env):
+def test_users_add_without_connect_fails(app, local_env):
     binary, env, _ = local_env
-    result = _run(binary, ["users", "add", "alice@example.com"], env)
+    result = _run(binary, ["users", "add", "alice@example.com"] + profile_flags(app), env)
     assert result.returncode != 0
     assert "not configured" in result.stdout.lower() or "not configured" in result.stderr.lower()
 

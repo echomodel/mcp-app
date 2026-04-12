@@ -76,3 +76,18 @@ def mcp_binary(app: App) -> str:
 def admin_binary(app: App) -> str:
     """Absolute path to the app's admin CLI binary in the venv."""
     return str(_binary_path(f"{app.name}-admin"))
+
+
+def profile_flags(app: App) -> list[str]:
+    """Generate dummy CLI flags for the app's profile model.
+
+    If the app has profile_expand=True, returns flags like
+    ['--token', 'test-placeholder'] for each field. If no
+    profile or expand=False, returns an empty list.
+    """
+    if not app.profile_model or not app.profile_expand:
+        return []
+    flags = []
+    for name in app.profile_model.model_fields:
+        flags.extend([f"--{name.replace('_', '-')}", "test-placeholder"])
+    return flags
