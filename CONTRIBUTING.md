@@ -185,6 +185,27 @@ should never affect `gwsa drive search`. Separate entry points
 mean separate config scopes — admin writes to its own setup file,
 the app CLI never reads it.
 
+### Only admin operations use a remote service URL
+
+Admin operations (the admin CLI) are the only mcp-app component
+that talks to a deployed instance's URL. Everything else works
+without any knowledge of a deployment URL:
+
+- **`my-app-mcp serve`** — IS the server. Listens on a port.
+- **`my-app-mcp stdio`** — local process, no network.
+- **`my-app` (business CLI)** — calls the SDK directly. For
+  data-owning apps, reads/writes the local store. For API-proxy
+  apps, calls external APIs (Google, etc.) directly. No mcp-app
+  server involved.
+- **The SDK** — business logic only. Reads `current_user` for
+  identity, calls external APIs or the local store. Never calls
+  back to an mcp-app service.
+
+The admin CLI learns the URL from `connect <url>` — the user
+provides it once, it's saved to `~/.config/{app-name}/setup.json`,
+and all subsequent admin commands use it. Neither the business
+CLI nor the MCP server ever reads this config.
+
 ### UserAuthStore protocol — one interface, two backends
 
 User management operations (add, list, revoke) go through the
