@@ -474,18 +474,44 @@ the user record, and tools are wired. The app is fully operational.
 
 ## User Management
 
-### Setup
+### Connect
+
+**Prefer the per-app admin CLI** (`my-app-admin`) over the
+generic CLI (`mcp-app`) whenever possible. The per-app CLI
+stores connection config per app — each app remembers its own
+target (local or remote) and signing key independently in
+`~/.config/{name}/setup.json`. This means you can switch between
+administering different apps without losing connection state,
+and return to an app months later without re-discovering how or
+where it was deployed.
+
+The generic CLI stores one connection at a time in
+`~/.config/mcp-app/setup.json`. Connecting to a different
+service overwrites the previous connection. It exists for cases
+where the per-app admin CLI isn't installed locally.
 
 ```bash
-# Local (filesystem store on this machine)
+# Per-app admin CLI (preferred) — local or remote
 my-app-admin connect local
-
-# Remote (deployed instance)
 my-app-admin connect https://your-service --signing-key xxx
+
+# Generic CLI — remote only, single connection
+mcp-app connect https://your-service --signing-key xxx
 ```
 
-All subsequent commands route automatically based on the
-connection mode.
+`connect local` is only available on the per-app admin CLI
+because it needs the app name to locate the filesystem store
+(`~/.local/share/{name}/users/`). The generic CLI doesn't know
+which app it's managing, so it only supports remote targets.
+
+Connection config is set once and never repeated. No other
+command accepts `--url` or `--signing-key`.
+
+**Note:** the framework currently tracks one connection per app
+— a single deployment environment (local or remote), not
+multiple environments. If you deploy the same app to staging
+and production, `connect` switches between them but only
+remembers the last one configured.
 
 ### Managing users
 

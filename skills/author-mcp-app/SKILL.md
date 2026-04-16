@@ -644,6 +644,30 @@ my-solution-mcp serve    # MCP server (HTTP or stdio)
 my-solution-admin        # admin: connect, users, tokens, health, probe, register
 ```
 
+**Always prefer the per-app admin CLI** (`my-solution-admin`)
+over the generic CLI (`mcp-app`). The per-app CLI stores its
+connection config per app — each app remembers its own target
+(local or remote) and signing key in
+`~/.config/{name}/setup.json`. This lets you return to an app
+in a future session and immediately run admin operations without
+re-discovering how or where it was deployed. The generic CLI
+stores only one connection at a time — connecting to a different
+service overwrites the previous one.
+
+The framework currently tracks one connection per app (a single
+deployment environment, whether local or remote). If the same
+app is deployed to multiple environments, `connect` switches
+between them but only remembers the last one configured.
+
+**At the start of any session involving admin operations**,
+verify the current connection before assuming it's correct.
+Run `my-solution-admin health` (remote) or
+`my-solution-admin users list` (local or remote) to confirm
+which target the CLI is pointed at. Don't assume that after
+a deploy or local MCP client configuration the admin CLI is
+connected to that target — `connect` and `deploy` are
+independent operations.
+
 The admin CLI handles user registration, profile updates, token
 issuance, revocation, deployment verification, and MCP client
 registration for both local and remote instances. The

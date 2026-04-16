@@ -83,9 +83,34 @@ tools that the AI agent orchestrates externally.
 
 App-specific CLIs (`my-app-mcp serve`, `my-app-admin`) get their config
 from Python args — they work from any directory. The `mcp-app` generic
-CLI is for remote admin (setup, users, health) when you don't have the
+CLI is for remote admin (connect, users, health) when you don't have the
 app's own admin CLI installed locally. No command depends on the current
 working directory.
+
+### Connection config is set once, used everywhere
+
+Both the generic CLI (`mcp-app connect`) and per-app admin CLI
+(`my-app-admin connect`) store the service URL and signing key
+in a config file. Every subsequent command reads from that file.
+No command except `connect` accepts `--url` or `--signing-key`
+flags.
+
+The per-app CLI also supports `connect local` for direct
+filesystem store access. The generic CLI does not — it doesn't
+know the app name, so it can't locate the store path
+(`~/.local/share/{name}/users/`).
+
+This is a deliberate design constraint. Repeating connection
+credentials on every command is error-prone, clutters help text,
+and teaches operators to paste secrets into shell history. The
+`connect` command is the single entry point for connection
+config — all other commands assume it's already configured.
+
+The same principle extends to future CLI design (see
+OPERATIONS.md's design principles on "url and signing-key as
+first-class universals"). When adding new admin commands, they
+read connection details from the existing config. They do not
+accept their own `--url` or `--signing-key` overrides.
 
 ### Config vs problem-domain resources
 
@@ -223,12 +248,19 @@ command code.
 
 ### `connect local` vs `connect <url>`
 
-The admin CLI needs to know where to manage users. Two modes:
+Both CLIs use `connect` to configure the admin target. Two modes:
 
 - `connect local` — write directly to the local filesystem store.
-  For stdio apps running on this machine.
+  For stdio apps running on this machine. **Per-app CLI only** —
+  requires the app name to locate the store path
+  (`~/.local/share/{name}/users/`).
 - `connect <url> --signing-key xxx` — talk to a deployed instance
   via HTTP admin API. For managing users on a remote server.
+  Available on both the generic and per-app CLIs.
+
+Both CLIs share a single `_connect_handler` implementation. The
+generic CLI passes `app_name=None`, which gates off `local` mode
+with a clear error message directing the user to the per-app CLI.
 
 This is configured once and remembered in
 `~/.config/{app-name}/setup.json`. Subsequent `users` commands

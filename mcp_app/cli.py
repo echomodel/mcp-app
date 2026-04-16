@@ -60,6 +60,31 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _connect_handler(target: str, signing_key: str | None, app_name: str | None):
+    """Shared connect logic for both generic and per-app CLIs.
+
+    When app_name is None (generic CLI), 'local' is not supported
+    because the generic CLI doesn't know which app's filesystem store
+    to target. Per-app CLIs pass their app_name to enable local mode.
+    """
+    if target == "local":
+        if app_name is None:
+            raise click.ClickException(
+                "'connect local' requires the per-app admin CLI "
+                "(e.g., my-app-admin connect local) because the "
+                "generic CLI doesn't know which app's store to use."
+            )
+        _save_setup({"mode": "local"}, app_name=app_name)
+        click.echo(f"Configured {app_name} for local access.")
+    else:
+        data = {"mode": "remote", "url": target}
+        if signing_key:
+            data["signing_key"] = signing_key
+        _save_setup(data, app_name=app_name)
+        label = app_name or "mcp-app"
+        click.echo(f"Configured {label}: {target}")
+
+
 def _print_probe(result: dict):
     """Render probe result as human-readable text."""
     click.echo(f"URL: {result['url']}")
@@ -139,16 +164,16 @@ def main():
 
 
 @main.command()
-@click.argument("url")
+@click.argument("target")
 @click.option("--signing-key", default=None, help="Signing key for admin auth.")
-def setup(url, signing_key):
-    """Configure connection to a deployed instance."""
-    data = _load_setup()
-    data["url"] = url
-    if signing_key:
-        data["signing_key"] = signing_key
-    _save_setup(data)
-    click.echo(f"Configured: {url}")
+def connect(target, signing_key):
+    """Configure connection to a deployed instance.
+
+    \b
+    Examples:
+      mcp-app connect https://my-app.run.app --signing-key xxx
+    """
+    _connect_handler(target, signing_key, app_name=None)
 
 
 @main.command()
@@ -400,15 +425,7 @@ def create_admin_cli(app_name: str) -> click.Group:
           connect local
           connect https://my-app.run.app --signing-key xxx
         """
-        if target == "local":
-            _save_setup({"mode": "local"}, app_name=app_name)
-            click.echo(f"Configured {app_name} for local access.")
-        else:
-            data = {"mode": "remote", "url": target}
-            if signing_key:
-                data["signing_key"] = signing_key
-            _save_setup(data, app_name=app_name)
-            click.echo(f"Configured {app_name}: {target}")
+        _connect_handler(target, signing_key, app_name=app_name)
 
     @cli.command()
     def health():
