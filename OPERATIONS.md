@@ -42,9 +42,9 @@ mcp-app stores just the admin URL and a reference to the signing
 key, and the operator deploys however they want (ssh+tarball,
 `gcloud run deploy`, `docker compose`, a private CI pipeline, a
 custom web UI — anything). More opinionated providers
-(gapp, cloudrun, k8s, github-actions) exist and plug into the
-same mechanism. Echomodel advocates gapp as a polished deployment
-experience on top; every solution works with `manual` without it.
+(cloudrun, k8s, github-actions) exist and plug into the same
+mechanism. Every solution works with `manual` without any
+provider ecosystem.
 
 Two universal concerns apply to every solution regardless of
 provider: **url** and **signing-key**. Both get first-class CLI
@@ -161,7 +161,7 @@ mcp-app url refresh <target>
 Every solution has a URL. The verbs always run; the provider decides
 what's supported (see [Provider capabilities](#provider-capabilities)).
 For `manual`, all three succeed and store/read the URL from the fleet
-entry. For cloud-backed providers (`gapp`, `cloudrun`), `show` and
+entry. For cloud-backed providers (`cloudrun`, etc.), `show` and
 `refresh` fetch the URL from the cloud; `set` errors with a pointer
 to the right verb (usually `deploy`).
 
@@ -185,7 +185,7 @@ mcp-app show [target]
 
 Prints everything currently known about a target: provider, url,
 signing-key status (opaque), source, ref, runtime, provider config,
-env, secrets (set/unset), notes, and any named environments. Not a plan,
+vars, notes, and any named environments. Not a plan,
 not a diff — just the facts. Target optional with cwd inference.
 
 ### Deploy
@@ -249,26 +249,15 @@ mcp-app fleets register <url> --name <name> [--path <path>]
 mcp-app fleets remove <name>
 ```
 
-### Config (secrets and machine-level settings)
+### Config (machine-level settings)
 
 ```bash
-mcp-app config secrets list
-mcp-app config secrets set <target> <field> [--stdin]
-mcp-app config secrets show <target> <field>            # references only; values redacted
-mcp-app config secrets export [--out <path>]
-mcp-app config secrets import <path>
-
 mcp-app config signing-key-store set [keyring|file|env]
 ```
 
-Use `--stdin` for CI/non-interactive secret injection:
-
-```bash
-echo "$CI_KEY" | mcp-app config secrets set echofit signing_key --stdin
-mcp-app deploy echofit
-```
-
-No magic environment variable name schemes.
+Signing key storage backend selection. See [Secret Storage](#secret-storage).
+The signing key itself is managed via the first-class `signing-key`
+verbs, not through a generic config command.
 
 ### Overrides
 
@@ -310,7 +299,6 @@ solutions:
     deploy: ...             # see below
     runtime: ...            # optional; overrides default
     vars: {...}             # optional; runtime environment variables
-    secrets: {...}          # optional
     envs:                   # optional; named environments (dev, prod, etc.)
       <env-name>: ...
     default_env: <name>     # optional
@@ -393,7 +381,6 @@ deploy:
 | `deploy.notes` | no | — | to envs (overrideable) |
 | `runtime` | no | `defaults.runtime` → `mcp-app` | to envs |
 | `vars` | no | — | to envs (merged) |
-| `secrets` | no | — | to envs (merged) |
 | `envs` | no | single-target deploy | — |
 | `default_env` | no | — | — |
 
@@ -407,7 +394,7 @@ Every attribute cascades lowest → highest precedence:
 4. CLI override flags
 
 Provider `config` fields merge across levels (env overrides
-solution overrides root). `vars` and `secrets` also merge.
+solution overrides root). `vars` also merges.
 
 `vars:` is never allowed at fleet `defaults` or root `providers:`
 level — it's always solution-specific. Similarly, `source:` only
@@ -488,7 +475,7 @@ cloud secret store holds them, resolved on demand.
 
 ### The sandwich
 
-**With a deploy provider (gapp, cloudrun, local-docker, etc.):**
+**With a deploy provider (cloudrun, local-docker, etc.):**
 
 ```
 mcp-app deploy configure    ← mcp-app (prompts from provider schema)
@@ -530,7 +517,7 @@ Ship with mcp-app itself. No `providers:` declaration needed.
 
 All other providers are separately installable. The README's
 "Integrated deployment" section walks through the common setup
-steps for widely-used providers like `gapp`, so operators who want
+steps for widely-used providers like `cloudrun`, so operators who want
 a polished GCP experience can install and configure in one pass.
 mcp-app itself stays lean — no provider ships as a hard dependency.
 
@@ -538,8 +525,18 @@ mcp-app itself stays lean — no provider ships as a hard dependency.
 
 Anyone can publish one as a pip package that registers under
 `entry_points(group="mcp_app.providers")`. Operator installs via
-`mcp-app providers add <name> --package <pip-spec>`. Community or
-vendors publish whatever bridges they want.
+`mcp-app providers add <name> --package <pip-spec>`. Three
+publisher scenarios, all identical from mcp-app's perspective:
+
+1. **Framework author** (echomodel) publishes providers for
+   primary targets (e.g., `mcp-app-cloudrun`).
+2. **Community developer** publishes a bridge to a platform they
+   use (e.g., `mcp-app-hackerhost`, `mcp-app-systemd`).
+3. **Cloud vendor** publishes native support because mcp-app
+   adoption makes it worthwhile.
+
+All three declare the same entry point. The operator installs
+whichever one fits. mcp-app doesn't know or care who wrote it.
 
 ### Anticipated providers — future roadmap
 
@@ -549,19 +546,13 @@ are open to community authorship.
 
 **For managed platforms (zero-ops):**
 
-- **`mcp-app-cloudrun`** — direct `gcloud run deploy --source` with
-  no intermediaries. Least opinionated GCP path. Config: project,
-  region, artifact-registry, gcs-build-bucket.
-- **`mcp-app-gapp`** — bridge to gapp; operator gets gapp's full
-  feature set. Neither mcp-app nor gapp know about each other
-  (third-party-looking provider). Richer than cloudrun for
-  echomodel workflows (approval gates, env-specific overrides,
-  build caching). Published separately as `echomodel/mcp-app-gapp`
-  on PyPI. Install via `mcp-app providers add gapp --package mcp-app-gapp`.
-  README's "Integrated deployment" section documents the full gapp
-  setup path — a natural fit for operators who want a one-command
-  polished GCP experience.
-- **`mcp-app-flyio`** — fly.io deploys. Config: app name, region.
+- **`mcp-app-cloudrun`** — deploys to Google Cloud Run. Handles
+  container build, secrets, persistent storage, and service
+  configuration. Published separately as
+  `echomodel/mcp-app-cloudrun` on PyPI. Install via
+  `mcp-app providers add cloudrun --package mcp-app-cloudrun`.
+  README's "Integrated deployment" section documents the full
+  Cloud Run setup path.
 - **`mcp-app-railway`** / **`mcp-app-render`** — similar for those PaaS.
 - **`mcp-app-k8s`** — render a manifest, `kubectl apply`. Config:
   namespace, context, chart values.
@@ -623,8 +614,8 @@ deeper comparison.
 | Homelab box serving family/household on LAN | local-docker (bind to LAN) | `local-docker` |
 | Bring-your-own VM in the cloud, single-user, bulletproof | VM + systemd on the VM | `mcp-app-systemd` |
 | Multi-service homelab, everything containerized | Docker / compose on the box | `mcp-app-docker` |
-| Spike-traffic or idle-heavy app, managed platform | Managed container (Cloud Run, Fly) | `mcp-app-cloudrun`, `mcp-app-flyio`, etc. |
-| Team with GCP infra, standardized workflow | Cloud Run via gapp | `mcp-app-gapp` |
+| Spike-traffic or idle-heavy app, managed platform | Cloud Run | `mcp-app-cloudrun` |
+| Team with GCP infra, standardized workflow | Cloud Run | `mcp-app-cloudrun` |
 | CI-driven, team-visible deploys | GitHub Actions | `mcp-app-github-actions` |
 
 ### `package:` field accepts any pip install target
@@ -694,7 +685,7 @@ Example matrix:
 |----------|---------|---------|-------------|--------|--------|-----------|
 | manual | ✓ | ✓ | ✓ (no-op) | ✓ | ✓ | ✗ |
 | local-docker | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
-| gapp | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ |
+| cloudrun | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ |
 | cloudrun | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ |
 | systemd | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
 
@@ -742,8 +733,7 @@ DeployRequest(
         checkout="/tmp/mcp-app-XXX" | None,   # fresh clone, if fleet did one
     ),
     config={...},                             # resolved provider config
-    env={...},                                # merged runtime env vars
-    secrets={...},                            # refs; provider resolves values
+    vars={...},                               # merged runtime env vars
     runtime="mcp-app",
     notes="...",                              # if set, for logs/summary
     fleet_name="default",
@@ -887,8 +877,8 @@ Deploy echofit
   provider: cloudrun (project=my-proj, region=us-central1)
   target:   https://echofit-xxx.a.run.app   (or: "new deployment")
   runtime:  mcp-app
-  env:      LOG_LEVEL=INFO
-  secrets:  signing_key (stored), third_party_api_key (stored)
+  vars:     LOG_LEVEL=INFO
+  signing key: set (sha256: 3a4f...e2c9)
   notes:    To rollback, run scripts/rollback.sh from repo root.
 
 Proceed? [y/N]
@@ -1105,7 +1095,7 @@ hosts, multi-container setups.
 Fits: operators who already run docker everywhere and want the
 image-based reproducibility without the systemd-native path.
 
-### Managed container platform (pip provider: cloudrun, gapp, flyio, etc.)
+### Managed container platform (pip provider: cloudrun, etc.)
 
 Provider-managed autoscaling, TLS termination, log aggregation.
 Scales to zero when idle (in some platforms), scales up on demand.
@@ -1113,9 +1103,24 @@ Scales to zero when idle (in some platforms), scales up on demand.
 Fits: spike traffic, multi-user, teams with existing managed-platform
 relationships. Zero infra ops, more dollars per sustained request.
 
-Cold starts (seconds) affect first-request latency on infrequent
-traffic. Persistent storage requires external services (Cloud SQL,
+Persistent storage requires external services (Cloud SQL,
 Cloud Storage, etc.), re-introducing network round-trips.
+
+### At-a-glance comparison
+
+| | stdio | local-docker | VM + systemd | Cloud Run (scale to zero) |
+|---|---|---|---|---|
+| Cold start delay | none (client launches) | none (always running) | none (always running) | seconds (on first request after idle) |
+| Cost at personal use | free | free (your machine) | ~$5-10/mo | free (within 2M requests/mo free tier) |
+| Always warm | only while client runs | yes | yes | no (unless min-instances=1, ~$15-30/mo) |
+| OS patching | n/a | your problem | your problem | managed |
+| Persistent local disk | yes | yes (volume mount) | yes | no (ephemeral; need external storage) |
+| SQLite viable | yes | yes | yes | no |
+| Multi-client | no | yes | yes | yes |
+| Multi-user | no | yes | yes | yes |
+| Cloud-portable | n/a | any Docker host | any Linux VM | GCP only |
+| TLS | n/a | your problem (caddy, etc.) | your problem | managed |
+| Autoscaling | no | no | no | yes |
 
 ### Comparison of disk I/O and data patterns
 
@@ -1155,8 +1160,8 @@ offsite, minimal ops.
 | Personal always-on app, single machine, one or a few clients | local-docker builtin |
 | Personal always-on app on a cloud VM, bulletproof, cheap | VM + systemd (`mcp-app-systemd` provider) |
 | Family/household LAN service | local-docker on a homelab box, bind LAN |
-| Multi-user app, moderate scale, willing to pay for zero-ops | managed container (`mcp-app-cloudrun`, `mcp-app-gapp`, `mcp-app-flyio`) |
-| Team with existing GCP workflow | `mcp-app-gapp` |
+| Multi-user app, moderate scale, willing to pay for zero-ops | Cloud Run or VM | `mcp-app-cloudrun`, `mcp-app-systemd` |
+| Team with existing GCP workflow | `mcp-app-cloudrun` |
 | CI-driven deploys | `mcp-app-github-actions` |
 | Bursty traffic, scale to zero | managed container platform |
 | Data-intensive (SQLite matters) | VM + systemd, or local-docker with a bind-mounted data volume |
@@ -1197,6 +1202,19 @@ contract hasn't defined concurrency behavior.
 `mcp-app fleet list` and similar will call `provider.status()` for
 every solution. Providers may have rate limits or latency. Need:
 caching policy, timeout behavior, degraded display.
+
+### Provider-specific state (opaque to mcp-app)
+
+Some providers may accumulate state that spans invocations —
+project IDs, storage bucket names, infrastructure state references,
+per-environment resource identifiers. This state is generally
+plaintext key/value pairs that are identifiers or addressing
+information, never secrets, and safe and appropriate for storage
+in fleet.yaml alongside the provider's config. mcp-app doesn't
+interpret this state, but may need to store and pass it back to
+the provider on subsequent calls (like a cookie). This need is
+foreseen as possible but has not formally materialized; it is
+something to keep in mind as providers are implemented.
 
 ### Default provider suggestions on empty machine
 
