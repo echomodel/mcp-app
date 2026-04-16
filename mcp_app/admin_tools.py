@@ -45,6 +45,17 @@ async def create_token(base_url: str, signing_key: str, email: str) -> dict:
 
 
 @mcp.tool()
+async def update_user_profile(base_url: str, signing_key: str, email: str,
+                               updates: dict) -> dict:
+    """Update profile fields for a user on a deployed mcp-app instance.
+
+    Merges the updates dict into the existing profile. Does not replace
+    fields that aren't in updates.
+    """
+    return await RemoteAuthAdapter(base_url, signing_key).update_profile(email, updates)
+
+
+@mcp.tool()
 async def revoke_user(base_url: str, signing_key: str, email: str) -> dict:
     """Revoke a user's access on a deployed mcp-app instance."""
     await RemoteAuthAdapter(base_url, signing_key).delete(email)

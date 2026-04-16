@@ -202,6 +202,16 @@ def users_add(email, profile_str):
         click.echo(f"Token: {result['token']}")
 
 
+@users.command("update-profile")
+@click.argument("email")
+@click.argument("key")
+@click.argument("value")
+def users_update_profile(email, key, value):
+    """Update a single profile field for a user."""
+    result = _run(_client().update_profile(email, {key: value}))
+    click.echo(f"Updated {key} for {email}")
+
+
 @users.command("revoke")
 @click.argument("email")
 def users_revoke(email):
@@ -460,11 +470,19 @@ def create_admin_cli(app_name: str) -> click.Group:
     @users.command("add", params=add_params)
     @click.pass_context
     def users_add(ctx, **kwargs):
-        """Register a user."""
+        """Register a new user. Fails if the user already exists."""
         from datetime import datetime, timezone
         from mcp_app.models import UserAuthRecord
 
         email = kwargs.pop("email")
+
+        store = _get_auth_store(app_name)
+        existing = _run(store.get(email))
+        if existing:
+            raise click.ClickException(
+                f"User already exists: {email}. "
+                f"Use 'users update-profile' to change profile fields."
+            )
 
         profile = None
         if model and expand:
@@ -484,6 +502,55 @@ def create_admin_cli(app_name: str) -> click.Group:
         click.echo(f"Added: {result['email']}")
         if "token" in result:
             click.echo(f"Token: {result['token']}")
+
+    # Build users update-profile dynamically from profile model
+    if model and expand:
+        field_names = list(model.model_fields.keys())
+        field_help = {}
+        for fname, finfo in model.model_fields.items():
+            desc = finfo.description or ""
+            type_name = finfo.annotation.__name__ if hasattr(finfo.annotation, '__name__') else str(finfo.annotation)
+            field_help[fname] = f"{type_name}: {desc}" if desc else type_name
+
+        help_lines = ["Update a single profile field for an existing user."]
+        help_lines.append("")
+        help_lines.append("Valid keys:")
+        for fname in field_names:
+            help_lines.append(f"  {fname} — {field_help[fname]}")
+
+        @users.command("update-profile")
+        @click.argument("email")
+        @click.argument("key", type=click.Choice(field_names))
+        @click.argument("value")
+        def users_update_profile(email, key, value):
+            __doc__ = "\n".join(help_lines)
+            store = _get_auth_store(app_name)
+            existing = _run(store.get(email))
+            if not existing:
+                raise click.ClickException(f"User not found: {email}")
+            # Validate the single field through the Pydantic model
+            test_data = {key: value}
+            validated = _validate_profile(test_data)
+            _run(store.update_profile(email, validated))
+            click.echo(f"Updated {key} for {email}")
+
+        users_update_profile.help = "\n".join(help_lines)
+    else:
+        @users.command("update-profile")
+        @click.argument("email")
+        @click.option("--profile", "profile_str", required=True,
+                      help="Profile fields to update as JSON string or @file.")
+        def users_update_profile(email, profile_str):
+            """Merge profile fields for an existing user."""
+            store = _get_auth_store(app_name)
+            existing = _run(store.get(email))
+            if not existing:
+                raise click.ClickException(f"User not found: {email}")
+            updates = _parse_profile_value(profile_str)
+            if model:
+                updates = _validate_profile(updates)
+            _run(store.update_profile(email, updates))
+            click.echo(f"Updated profile for {email}")
 
     @users.command("revoke")
     @click.argument("email")

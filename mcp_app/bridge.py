@@ -67,11 +67,19 @@ class DataStoreAuthAdapter:
         self.store.save(record.email, self.USER_KEY, updated)
         return {"email": record.email}
 
-    async def update_profile(self, email: str, profile: dict) -> None:
-        """Update just the profile portion of a user record."""
-        existing = self.store.load(email, self.USER_KEY) or {}
+    async def update_profile(self, email: str, updates: dict) -> dict:
+        """Merge updates into a user's profile. User must exist.
+
+        Returns the updated profile dict.
+        """
+        existing = self.store.load(email, self.USER_KEY)
+        if not existing:
+            raise KeyError(f"User not found: {email}")
+        profile = existing.get("profile") or {}
+        profile.update(updates)
         existing["profile"] = profile
         self.store.save(email, self.USER_KEY, existing)
+        return profile
 
     async def delete(self, email: str) -> None:
         self.store.delete(email, self.USER_KEY)

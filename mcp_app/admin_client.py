@@ -142,6 +142,16 @@ class RemoteAuthAdapter:
         )
         resp.raise_for_status()
 
+    async def update_profile(self, email: str, updates: dict) -> dict:
+        resp = await self._http.patch(
+            f"{self.base_url}/admin/users/{email}/profile",
+            headers=self._headers(),
+            json=updates,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def create_token(self, email: str) -> dict:
         resp = await self._http.post(
             f"{self.base_url}/admin/tokens",

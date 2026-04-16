@@ -133,6 +133,23 @@ def create_admin_app(store: UserAuthStore) -> Starlette:
         await store.save(user)
         return JSONResponse({"revoked": email})
 
+    async def update_profile(request: Request) -> JSONResponse:
+        """Merge fields into a user's profile."""
+        if not _verify_admin(request):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+        email = request.path_params["email"]
+        user = await store.get(email)
+        if not user:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+
+        body = await request.json()
+        if not body or not isinstance(body, dict):
+            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+
+        updated = await store.update_profile(email, body)
+        return JSONResponse({"email": email, "profile": updated})
+
     async def create_token(request: Request) -> JSONResponse:
         """Issue a new token for an existing, active user."""
         if not _verify_admin(request):
@@ -153,6 +170,7 @@ def create_admin_app(store: UserAuthStore) -> Starlette:
     return Starlette(routes=[
         Route("/users", register_user, methods=["POST"]),
         Route("/users", list_users, methods=["GET"]),
+        Route("/users/{email:path}/profile", update_profile, methods=["PATCH"]),
         Route("/users/{email:path}", revoke_user, methods=["DELETE"]),
         Route("/tokens", create_token, methods=["POST"]),
     ])

@@ -31,6 +31,10 @@ class UserAuthStore(Protocol):
         """Create or update a user. Returns result dict (may include token)."""
         ...
 
+    async def update_profile(self, email: str, updates: dict) -> dict:
+        """Merge updates into a user's profile. Returns updated profile."""
+        ...
+
     async def delete(self, email: str) -> None:
         """Delete a user's auth record."""
         ...
