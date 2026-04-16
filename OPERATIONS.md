@@ -19,6 +19,19 @@ Operating an mcp-app solution — deploying, managing users, checking
 health, rotating tokens — follows a unified model regardless of
 which solution, how you deploy, or how many solutions you manage.
 
+### Three layers, three owners
+
+| Layer | Where it lives | Who owns it |
+|-------|---------------|-------------|
+| **App definition** | `App` object in solution package | Solution author |
+| **Fleet manifest** | `fleet.yaml` (local or git repo) | Operator |
+| **Deploy provider** | pip-installable package (or builtin) | Anyone |
+
+Solution authors don't know how the operator deploys. Operators
+don't know how the provider works internally. Providers don't know
+which fleet they're in. Each layer is independently owned and
+independently replaceable.
+
 A single substrate (a "fleet") scales invisibly from a solo operator
 with one solution to a team managing many solutions across multiple
 environments. Simple cases never encounter fleet vocabulary. Complex
@@ -108,18 +121,18 @@ default fleet.
 
 ```bash
 cd ~/projects/echofit
-mcp-app deploy configure --deployment dev
-mcp-app deploy configure --deployment prod
+mcp-app deploy configure --env dev
+mcp-app deploy configure --env prod
 
-mcp-app deploy echofit:dev
-mcp-app deploy echofit:prod --ref v1.2.3
+mcp-app deploy --env dev
+mcp-app deploy --env prod --ref v1.2.3
 
-mcp-app users add echofit:prod alice@example.com   # prod users only
-mcp-app users add echofit:dev  alice@example.com   # dev users (separate roster)
+mcp-app users add alice@example.com --env prod   # prod users only
+mcp-app users add alice@example.com --env dev    # dev users (separate roster)
 ```
 
-`solution:deployment` syntax is only required when deployments are
-configured. Solo-deployment solutions don't use it.
+`--env` is only needed when the solution has multiple environments.
+When a `default_env` is set, bare commands target the default.
 
 ### Multi-fleet
 
@@ -172,22 +185,24 @@ mcp-app show [target]
 
 Prints everything currently known about a target: provider, url,
 signing-key status (opaque), source, ref, runtime, provider config,
-env, secrets (set/unset), notes, and any deployments. Not a plan,
+env, secrets (set/unset), notes, and any named environments. Not a plan,
 not a diff — just the facts. Target optional with cwd inference.
 
 ### Deploy
 
 ```bash
-mcp-app deploy [target] [--ref <ref>] [--fleet <name>] [--deployment <name>]
+mcp-app deploy [target] [--ref <ref>] [--fleet <name>] [--env <name>]
 mcp-app deploy [target] --dry-run                       # preview; no changes
 mcp-app deploy configure [target]                       # first-time wizard
 mcp-app deploy config <field> set <value> [target]      # per-attribute tweak
 mcp-app deploy config show [target]
 ```
 
-`target` is `solution` or `solution:deployment`. When omitted, cwd
-inference resolves it if the current directory is an mcp-app
-solution (its `pyproject.toml` declares `[project.entry-points."mcp_app.apps"]`).
+`target` is the solution name. When omitted, cwd inference resolves
+it if the current directory is an mcp-app solution (its
+`pyproject.toml` declares `[project.entry-points."mcp_app.apps"]`).
+Use `--env <name>` to target a specific environment when the
+solution has multiple.
 
 ### Admin
 
@@ -216,12 +231,12 @@ mcp-app providers remove <name>
 The `manual` builtin appears in `list` without declaration.
 Pip-installable providers appear once installed.
 
-### Deployments
+### Environments
 
 ```bash
-mcp-app deployments list [solution]
-mcp-app deployments add <target>                        # alias of 'deploy configure --deployment X'
-mcp-app deployments remove <target>
+mcp-app envs list [solution]
+mcp-app envs add <solution> <env-name>                  # alias of 'deploy configure --env X'
+mcp-app envs remove <solution> <env-name>
 ```
 
 ### Fleets (advanced)
@@ -260,7 +275,7 @@ No magic environment variable name schemes.
 | Flag | Effect |
 |------|--------|
 | `--fleet <name>` | Use a specific fleet for this invocation. |
-| `--deployment <name>` | Specify deployment when solution has multiple. Alternative to `solution:deployment` syntax. |
+| `--env <name>` | Target a specific environment when solution has multiple. |
 | `--ref <ref>` | Deploy a specific git ref. Overrides fleet-entry ref. |
 
 No `--source` flag, no `--use-working-tree`. Source is locked to
@@ -270,9 +285,9 @@ the fleet entry for reproducibility. See [Source locking](#source-locking).
 
 When cwd is an mcp-app solution, `target` is optional on every
 command. pyproject's `mcp_app.apps` entry-point name resolves the
-solution. When a solution has multiple deployments and no
-`default_deployment` is set, the CLI errors with the list of
-available deployments — cwd never silently picks one.
+solution. When a solution has multiple environments and no
+`default_env` is set, the CLI errors with the list of
+available environments — cwd never silently picks one.
 
 ## Schema Reference
 
@@ -294,11 +309,11 @@ solutions:
     ref: <ref>              # optional
     deploy: ...             # see below
     runtime: ...            # optional; overrides default
-    env: {...}              # optional
+    vars: {...}             # optional; runtime environment variables
     secrets: {...}          # optional
-    deployments:            # optional multi-env
-      <deployment-name>: ...
-    default_deployment: <name>  # optional
+    envs:                   # optional; named environments (dev, prod, etc.)
+      <env-name>: ...
+    default_env: <name>     # optional
 ```
 
 ### Flattened `deploy:` block
@@ -325,7 +340,7 @@ The same flattening applies to top-level `providers.<name>:`:
 ### `notes:` — operator context for any provider
 
 Optional free-form text on any `deploy:` block (solution or
-deployment level). Not consumed by mcp-app. Printed in the pre-deploy
+env level). Not consumed by mcp-app. Printed in the pre-deploy
 summary and shown to agents and humans running a deploy. Useful for:
 
 - **`manual` provider**: operator explains how to deploy, because
@@ -371,16 +386,16 @@ deploy:
 
 | Field | Required | Default | Inherits? |
 |-------|----------|---------|-----------|
-| `source` | yes | — | to deployments |
-| `ref` | no | repo default branch | to deployments |
-| `deploy.provider` | no | `defaults.deploy` → `manual` | to deployments |
-| `deploy.<config field>` | depends on provider's schema | provider's own default (if any) | to deployments (merged) |
-| `deploy.notes` | no | — | to deployments (overrideable) |
-| `runtime` | no | `defaults.runtime` → `mcp-app` | to deployments |
-| `env` | no | — | to deployments (merged) |
-| `secrets` | no | — | to deployments (merged) |
-| `deployments` | no | single-target deploy | — |
-| `default_deployment` | no | — | — |
+| `source` | yes | — | to envs |
+| `ref` | no | repo default branch | to envs |
+| `deploy.provider` | no | `defaults.deploy` → `manual` | to envs |
+| `deploy.<config field>` | depends on provider's schema | provider's own default (if any) | to envs (merged) |
+| `deploy.notes` | no | — | to envs (overrideable) |
+| `runtime` | no | `defaults.runtime` → `mcp-app` | to envs |
+| `vars` | no | — | to envs (merged) |
+| `secrets` | no | — | to envs (merged) |
+| `envs` | no | single-target deploy | — |
+| `default_env` | no | — | — |
 
 ### Inheritance order
 
@@ -388,15 +403,15 @@ Every attribute cascades lowest → highest precedence:
 
 1. Defaults and root provider config
 2. Solution-level
-3. Deployment-level
+3. Env-level
 4. CLI override flags
 
-Provider `config` fields merge across levels (deployment overrides
-solution overrides root). `env` and `secrets` also merge.
+Provider `config` fields merge across levels (env overrides
+solution overrides root). `vars` and `secrets` also merge.
 
-`env:` is never allowed at fleet `defaults` or root `providers:`
+`vars:` is never allowed at fleet `defaults` or root `providers:`
 level — it's always solution-specific. Similarly, `source:` only
-makes sense at solution or deployment level.
+makes sense at solution or env level.
 
 ### Minimum valid fleet.yaml
 
@@ -466,10 +481,40 @@ varying config belongs in fleet; solution-intrinsic config stays
 in the repo; provider-specific settings belong in provider config.
 
 Signing keys are the exceptional case: they always vary (unique
-per deployment) but never touch disk in plaintext. Keyring or
+per environment) but never touch disk in plaintext. Keyring or
 cloud secret store holds them, resolved on demand.
 
 ## Provider Plugin Model
+
+### The sandwich
+
+**With a deploy provider (gapp, cloudrun, local-docker, etc.):**
+
+```
+mcp-app deploy configure    ← mcp-app (prompts from provider schema)
+    ↓
+provider.deploy()           ← provider (cloud/tool-specific)
+    ↓
+mcp-app health              ← mcp-app (verify it's up)
+mcp-app users add           ← mcp-app (manage users via admin API)
+```
+
+**With manual provider (operator deploys externally):**
+
+```
+operator deploys however    ← their tools, their process
+    ↓
+mcp-app url set             ← mcp-app (records where it landed)
+mcp-app signing-key set     ← mcp-app (records the admin key)
+    ↓
+mcp-app health              ← mcp-app (verify it's up)
+mcp-app users add           ← mcp-app (manage users via admin API)
+```
+
+mcp-app owns everything except the deploy step. With a provider,
+that step is delegated. With manual, the operator handles it and
+tells mcp-app the result. The admin layer below is identical
+either way.
 
 ### Builtin providers
 
@@ -668,16 +713,16 @@ class DeployProvider:
     def deploy(self, request: DeployRequest) -> DeployResult:
         """Execute a deploy. Provider gets fully-resolved context."""
 
-    def status(self, solution: str, deployment: str | None) -> Status:
+    def status(self, solution: str, env: str | None) -> Status:
         """Return current URL, last deployed ref/sha, health."""
 
-    def resolve_signing_key(self, solution: str, deployment: str | None) -> str:
-        """Fetch signing key from provider's secret store on demand."""
+    def get_signing_key(self, solution: str, env: str | None) -> str:
+        """Fetch signing key on demand."""
 
-    def set_signing_key(self, solution, deployment, value) -> None:
+    def set_signing_key(self, solution, env, value) -> None:
         """Only called if capability sk.set is True."""
 
-    def rotate_signing_key(self, solution, deployment) -> None:
+    def rotate_signing_key(self, solution, env) -> None:
         """Only called if capability sk.rotate is True."""
 ```
 
@@ -689,7 +734,7 @@ inheritance and merging. Providers don't read fleet.yaml.
 ```python
 DeployRequest(
     solution="echofit",
-    deployment="dev" | None,
+    env="dev" | None,
     source=Source(
         url="echomodel/echofit",
         ref="main",
@@ -823,14 +868,14 @@ with a clear instruction on how to supply the value via
 ### Multi-env deploy
 
 ```bash
-$ mcp-app deploy configure --deployment dev
-$ mcp-app deploy configure --deployment prod
+$ mcp-app deploy configure --env dev
+$ mcp-app deploy configure --env prod
 
-$ mcp-app deploy echofit:dev
-$ mcp-app deploy echofit:prod --ref v1.2.3
+$ mcp-app deploy --env dev
+$ mcp-app deploy --env prod --ref v1.2.3
 ```
 
-Each deployment has its own URL, signing key, and user roster.
+Each environment has its own URL, signing key, and user roster.
 
 ### Pre-deploy summary
 
@@ -887,7 +932,7 @@ mcp-app config signing-key-store set file
 ```
 
 Canonical storage coordinates are derived deterministically from
-(fleet, solution, deployment, field_name). Operator never types or
+(fleet, solution, env, field_name). Operator never types or
 sees them. Reattaching (new machine, cloned fleet) works
 automatically — mcp-app checks the store and prompts if missing.
 
@@ -915,7 +960,7 @@ Everything it persists is configuration (intent). Runtime state
 **Runtime state** (URL, last sha, image tag, health):
 
 - Owned by the provider.
-- Fetched via `provider.status(solution, deployment)` on demand.
+- Fetched via `provider.status(solution, env)` on demand.
 - Signing keys resolved via `provider.resolve_signing_key(...)`,
   never cached on disk in plaintext.
 - Provider-internal caching (in-session memoization, its own cache
@@ -1166,7 +1211,7 @@ asking operator for a pip spec.
 - **FLEET.md** (prior design): this document supersedes it.
   FLEET.md's provider plugin model, source field semantics, and
   fleet-registry concepts carry forward. FLEET.md's
-  "solutions-as-deployments" naming, fleetless-vs-fleet distinction,
+  fleetless-vs-fleet distinction,
   and nested `config:` shape are revised here.
 - **CONTRIBUTING.md**: architectural decisions remain. The
   "admin tooling rationalization" (#17), "agent-composed over
