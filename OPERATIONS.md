@@ -1521,6 +1521,197 @@ the wizard offer? Hardcoded list couples mcp-app to specific
 providers. Leaning on a community-maintained directory or just
 asking operator for a pip spec.
 
+## Why This Exists — Prior Art and Justification
+
+### The problem that started this
+
+Before mcp-app and its fleet system, every MCP server deployment
+to Cloud Run went through Terraform with custom Python scripts.
+Each solution repo had its own `.tf` files, its own state backend,
+its own prerequisite scripts. The pain points:
+
+- **Per-repo repetition.** Every new MCP server meant copying and
+  adapting Terraform configs. Similar but not identical across
+  repos. HCL drift between solutions was constant.
+- **Prerequisite bootstrapping.** Each deployment needed a GCP
+  project created, billing attached, APIs enabled, a state bucket
+  provisioned, IAM bindings configured, artifact registry set up.
+  Custom Python scripts handled this, differently per repo.
+- **Scattered state.** Terraform state lived in GCS buckets, one
+  per solution. Finding which project, which bucket, which state
+  file for a given solution required institutional memory.
+- **Cognitive load.** "Did I create the project for this one? Is
+  billing attached? Did I enable the right APIs? Where's the
+  signing key?" Every deploy was a checklist of things that should
+  have been automatic.
+- **Inconsistency.** Each solution's deploy was slightly different.
+  Different scripts, different variable names, different state
+  layouts. No common vocabulary across solutions.
+
+This is textbook **deployment toil** — work that is manual,
+repetitive, automatable, and scales linearly with the number of
+services (per Google's SRE definition).
+
+### What existed that could have solved it
+
+Each candidate evaluated honestly:
+
+**Terragrunt** — the industry standard for DRY Terraform. Wraps
+Terraform with includes, auto-generates backend configs, manages
+state per-environment. Directly targets the "repetitive configs
+across repos" pain. **But:** still requires HCL literacy, still
+puts config files in or near repos, and critically does not
+automate GCP resource bootstrapping (project creation, billing,
+buckets, IAM). Reduces repetition; doesn't eliminate cognitive
+load.
+
+**Shared Terraform modules** — encapsulate the common Cloud Run
+pattern in one module, each repo calls it with minimal inputs.
+Reduces duplication further. **But:** still per-repo `.tf` files,
+still operator-managed state backends, still "did I create the
+bucket for this one?"
+
+**`gcloud run deploy --source .`** — the simplest possible Cloud
+Run deploy. One command, no Terraform. Google Buildpacks detect
+Python, containerize, deploy. **But:** requires the project to
+already exist with billing, APIs, and artifact registry. Doesn't
+manage signing keys, doesn't track state, each service is ad-hoc.
+Solves the deploy step; ignores everything around it.
+
+**Pulumi / CDKTF** — IaC in Python instead of HCL. More natural
+syntax. **But:** same structural problems — per-repo config, state
+management, no bootstrapping automation. Same toil in Python.
+
+**Google Cloud Deploy** — managed deployment pipelines. Rollout
+strategies, approvals, audit trail. **But:** assumes infrastructure
+already exists. Doesn't create projects or buckets.
+
+**Skaffold** — Google's build→deploy dev loop tool. Supports Cloud
+Run. **But:** doesn't bootstrap infrastructure, doesn't manage
+state, doesn't provide cross-solution consistency.
+
+**HashiCorp Waypoint (discontinued 2024)** — the closest prior art
+to what this system describes. Platform-agnostic build/deploy/
+release with a plugin model. Declared a `waypoint.hcl` per repo,
+plugins handled the platform step. **Discontinued because it didn't
+find product-market fit.** The general-purpose "deploy anything
+anywhere" abstraction was too thin to justify its existence between
+the app and the platform. Instructive failure — see risks below.
+
+**Kamal (Basecamp)** — opinionated deploy to VMs via Docker.
+Similar philosophy (simple, removes complexity). **But:** targets
+VMs behind a load balancer, not Cloud Run. Ruby ecosystem.
+
+**Render / Railway / Fly.io** — PaaS platforms that eliminate
+deployment complexity by changing the platform entirely. Would
+solve the problem by leaving GCP. Trade-off: vendor lock-in to
+a smaller provider, giving up GCP's ecosystem.
+
+**Verdict:** for the specific combination of needs — GCP/Cloud Run
+target, automated project/bucket/IAM bootstrapping, zero per-repo
+config, consistent cross-solution experience, MCP-server-aware
+operations — nothing off-the-shelf existed. Terragrunt comes
+closest for repetition; nothing addresses bootstrapping or
+MCP-domain-specific operations.
+
+### The progression
+
+1. **Terraform + custom scripts** — worked but created the toil
+   described above.
+2. **gapp** — consolidated all GCP bootstrapping and Cloud Run
+   deployment into one tool. Removed deployment config from
+   solution repos. Made every solution deploy the same way. Reduced
+   cognitive load to near zero for the common case.
+3. **mcp-app framework** — wrapped FastMCP with multi-user auth,
+   admin endpoints, user management, store abstraction. Made MCP
+   servers production-ready without per-solution auth plumbing.
+4. **Fleet/provider system** (this document) — generalizes gapp's
+   deployment model across providers (not just Cloud Run) while
+   keeping the "zero config in the solution repo" principle and
+   adding MCP-domain-specific operations (signing keys, admin API,
+   user management, health).
+
+Each step eliminated a specific pain the previous step didn't
+address. The progression was driven by real operational friction,
+not architecture astronautics.
+
+### What patterns are established vs. novel
+
+**Established patterns applied to a new domain:**
+
+| Pattern | Our version | Precedent |
+|---------|-------------|-----------|
+| Declarative deployment manifest | fleet.yaml | docker-compose.yml, fly.toml, Terraform `.tf` |
+| Provider plugin model | `mcp_app.providers` entry points | Terraform providers, pytest plugins, Flask extensions |
+| Self-describing plugin schema | `describe()` returns fields | Terraform provider schema, OpenAPI, JSON Schema |
+| Progressive disclosure | invisible fleet → multi-fleet | kubectl contexts, git remotes |
+| Three-layer ownership | solution author / operator / provider | Open Application Model (OAM): developer / operator / infra |
+| Config inheritance | defaults → solution → env | Terraform variable precedence, k8s ConfigMap overlays |
+| Universal verbs over backends | `url show`, `signing-key set` | `kubectl get`, `terraform plan` |
+
+The Open Application Model (OAM) / KubeVela project is the
+closest formal standard — it explicitly separates "application
+developer" from "application operator" from "infrastructure
+operator." This design aligns with OAM's philosophy without
+adopting its spec.
+
+**Genuinely novel (no off-the-shelf equivalent):**
+
+1. **MCP server framework with built-in auth + admin + test suite.**
+   FastMCP provides the protocol; mcp-app wraps it for production
+   multi-user deployment. Analogy: Django doesn't reinvent WSGI —
+   it wraps it with auth+admin+ORM for web apps. mcp-app wraps
+   FastMCP with auth+admin+store for MCP servers. No one else has
+   done this because MCP is months old.
+
+2. **The manual provider pattern.** "Deployment is your problem;
+   mcp-app manages the operational layer (users, tokens, health)."
+   Terraform, Pulumi, and k8s ARE the deployment — there is no
+   "I deployed externally, just manage operations" mode. This is a
+   genuine design insight: not everyone wants managed deployment,
+   but everyone with a deployed service wants managed operations.
+
+3. **Domain-specific deployment management for MCP servers.** No
+   deployment tool knows about signing keys, MCP admin APIs, user
+   tokens, or MCP health endpoints. General-purpose IaC deploys
+   containers; this system deploys MCP services and knows what to
+   do after they're running.
+
+### Risks and watch-outs
+
+**The Waypoint trap.** HashiCorp built exactly "platform-agnostic
+deploy with plugins" and killed it. The general-purpose layer
+between "app" and "platform" didn't justify itself — operators who
+use Cloud Run learn Cloud Run; operators who use k8s learn k8s. A
+generic abstraction serving both served neither. This system avoids
+the trap today because it is domain-specific (MCP servers). The
+`runtime: mcp-app | none` axis and the future vision (fleet as its
+own product) push toward the same generalization. **The MCP domain
+knowledge is the moat. Stay domain-specific.**
+
+**MCP is months old.** If the MCP spec adds native auth, deployment
+standards, or a server registry, some mcp-app machinery becomes
+redundant. First-mover advantage is real but the spec will evolve.
+Build with that assumption.
+
+**Complexity budget.** Framework + fleet + CLI + providers + skills
++ tests is significant surface area. Each piece is individually
+justified; together they're heavy for someone who just wants to
+deploy one MCP server. The progressive disclosure (manual →
+local-docker → cloudrun → fleet) manages this — but watch for
+moments where the stack's total weight discourages adoption at the
+entry point.
+
+### Conclusion
+
+The justification for building is: **the domain knowledge is the
+product.** Terraform doesn't know about signing keys. `gcloud`
+doesn't know about MCP admin APIs. No tool manages the full
+lifecycle of an MCP service from deployment through user
+management. The patterns are established; the domain application
+is novel. The Terraform → gapp → fleet path was a reasonable
+progression driven by real pain, not reinvention for its own sake.
+
 ## Relationship to Existing Documents
 
 - **FLEET.md** (prior design): this document supersedes it.
