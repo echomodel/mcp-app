@@ -382,6 +382,10 @@ may depend on newer framework features.
 - [ ] Optionally, opinionated deployment tooling in-repo if
       the app is deliberately committed to one (see the
       opinionated-tooling alternative)
+- [ ] Optional compatibility artifacts (`Procfile`, minimal
+      `Dockerfile`) shipped if the author wants the solution
+      deployable via non-mcp-app tooling — these are additive,
+      not a commitment to any platform
 - [ ] `SIGNING_KEY` set as environment variable (no default)
 
 ## Repository Structure
@@ -1314,6 +1318,44 @@ repo. When reviewing or authoring, never suggest persisting
 deployment metadata inside the solution app repo just because
 it might be convenient — that's how reusable products get
 their portability quietly stolen.
+
+### The compatibility-artifact middle ground
+
+Between "fully agnostic" and "opinionated in-repo tooling" sits
+a third valid posture: **agnostic for mcp-app deploy, with
+minimal compatibility artifacts** for non-mcp-app tools.
+
+A solution built on mcp-app is also a standard Python web
+service. Shipping a tiny, platform-neutral artifact doesn't
+commit the repo to a platform; it just makes the app consumable
+by tools that need an entry-point hint. The artifacts that
+matter:
+
+- **`Procfile`** (one line): unlocks `gcloud run deploy
+  --source .`, Heroku, Render, Fly, Railway, any Procfile-aware
+  PaaS. Doesn't name any cloud vendor. Example:
+  ```
+  web: my-app-mcp serve --host 0.0.0.0 --port $PORT
+  ```
+- **`Dockerfile`** (minimal, ~5 lines): unlocks local
+  `docker build`, any container platform, CI-built images.
+  Doesn't pick a cloud or a registry.
+
+These are *additive*. `mcp-app deploy` (via `cloudrun` provider,
+etc.) brings its own build template and ignores these artifacts.
+Opinionated deploy tools (e.g., a shipped `.tf` module for one
+specific platform) bring their own containerization and ignore
+these artifacts. Bare `gcloud` / Heroku / etc. consume them.
+Every downstream consumer is happy.
+
+**When to suggest shipping these:** when the solution is
+publicly reusable and the author wants to minimize friction for
+any would-be deployer. When authors say "I want this to work
+with just `gcloud run deploy --source .`" — ship a `Procfile`.
+
+**When to skip:** stdio-only apps; truly internal apps with a
+single committed deploy path; apps where the author wants to
+force `mcp-app deploy` as the only path.
 
 ### The opinionated-tooling alternative — when and when not
 

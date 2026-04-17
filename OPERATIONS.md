@@ -1303,8 +1303,12 @@ resources.
 
 ## Design Principles
 
-1. **Solution repo stays deploy-agnostic.** No Dockerfile required,
-   no deploy config, no cloud references in the solution.
+1. **Solution repo stays deploy-agnostic for mcp-app.** `mcp-app
+   deploy` requires no Dockerfile, no deploy config, no cloud
+   references in the solution. Solution authors *may* ship optional
+   compatibility artifacts (e.g., a one-line `Procfile`, a minimal
+   `Dockerfile`) to enable non-mcp-app deploy paths; these are
+   additive and ignored by mcp-app providers that don't need them.
 2. **CLI simplicity is the invariant.** New features extend through
    defaults/inference, never by requiring new mandatory CLI
    arguments for the simple case.
