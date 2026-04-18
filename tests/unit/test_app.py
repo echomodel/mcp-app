@@ -80,21 +80,6 @@ def test_admin_cli_has_connect_users_health(tools_module):
     assert "health" in commands
 
 
-def test_build_asgi(tools_module, tmp_path):
-    os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
-    os.environ["SIGNING_KEY"] = "test-key-32chars-minimum-length!!"
-    try:
-        app = App(name="test-app", tools_module=tools_module)
-        asgi_app, mcp, store = app.build_asgi()
-        assert asgi_app is not None
-        tool_names = [t.name for t in mcp._tool_manager.list_tools()]
-        assert "greet" in tool_names
-        assert "ping" in tool_names
-    finally:
-        del os.environ["APP_USERS_PATH"]
-        del os.environ["SIGNING_KEY"]
-
-
 def test_profile_model_registers_on_construction(tools_module):
     from pydantic import BaseModel
     import mcp_app.context as ctx
@@ -117,3 +102,55 @@ def test_profile_model_registers_on_construction(tools_module):
 def test_app_without_profile(tools_module):
     app = App(name="test-app", tools_module=tools_module)
     assert app.profile_model is None
+
+
+def test_app_construction_without_env_vars(tools_module):
+    """App constructs at import time; env vars only needed on first ASGI call."""
+    for var in ("SIGNING_KEY", "APP_USERS_PATH"):
+        os.environ.pop(var, None)
+    app = App(name="test-app", tools_module=tools_module)
+    assert app.name == "test-app"
+    assert app._asgi is None
+
+
+def test_app_is_asgi_callable_via_httpx(tools_module, tmp_path):
+    """App instance is the ASGI callable — works with httpx.ASGITransport,
+    uvicorn, or any ASGI host without any wrapping."""
+    import asyncio
+    import httpx
+
+    os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
+    os.environ["SIGNING_KEY"] = "test-key-32chars-minimum-length!!"
+    try:
+        app = App(name="test-app", tools_module=tools_module)
+
+        async def run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                r1 = await client.get("/health")
+                r2 = await client.get("/health")
+                return r1, r2
+
+        r1, r2 = asyncio.run(run())
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r1.json() == {"status": "ok"}
+        assert app._asgi is not None
+    finally:
+        del os.environ["APP_USERS_PATH"]
+        del os.environ["SIGNING_KEY"]
+
+
+def test_tools_registered_with_identity_enforcement(tools_module, tmp_path):
+    """Every discovered tool is wrapped with identity enforcement."""
+    os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
+    os.environ["SIGNING_KEY"] = "test-key-32chars-minimum-length!!"
+    try:
+        app = App(name="test-app", tools_module=tools_module)
+        app._asgi = app._build_asgi()
+        tool_names = [t.name for t in app._mcp._tool_manager.list_tools()]
+        assert "greet" in tool_names
+        assert "ping" in tool_names
+    finally:
+        del os.environ["APP_USERS_PATH"]
+        del os.environ["SIGNING_KEY"]

@@ -41,7 +41,7 @@ the skills don't reflect the current framework, agents will
 build or operate apps wrong.
 
 This includes changes to: the `App` class, `mcp_app.testing`
-modules, CLI factories, bootstrap, middleware, store protocol,
+modules, CLI factories, middleware, store protocol,
 identity enforcement, admin endpoints, entry point conventions,
 and deployment patterns. If it affects how an implementer
 integrates, configures, tests, deploys, or operates — the
@@ -466,10 +466,11 @@ Type hints become tool schemas. No `@mcp.tool()` decorators. The framework
 discovers and registers tools automatically from the module passed to
 `create_mcp_cli`.
 
-How this works: bootstrap receives the tools module, finds all public
-async functions via `inspect`, and calls `mcp.tool()(func)` on each one.
-The decorator still runs — mcp-app just calls it for you so your tools
-module has no framework coupling.
+How this works: `App` receives the tools module, finds all public
+async functions via `inspect`, and calls `mcp.tool()(func)` on each one
+(each wrapped with `_require_identity` first). The decorator still
+runs — mcp-app just calls it for you so your tools module has no
+framework coupling.
 
 ### What mcp-app provides
 
@@ -546,14 +547,15 @@ refuses to start without it.
 
 ### Solution entry points
 
-Solutions declare a console script that invokes `mcp-app stdio`:
+Solutions declare console scripts that invoke the `App`'s CLIs:
 
 ```toml
 [project.scripts]
-my-solution-mcp = "my_solution.cli:run_stdio"
+my-solution-mcp = "my_solution:app.mcp_cli"
+my-solution-admin = "my_solution:app.admin_cli"
 ```
 
-Users register with: `claude mcp add my-solution -- my-solution-mcp`
+Users register with: `claude mcp add my-solution -- my-solution-mcp stdio --user local`
 
 ## Tool Discovery
 
@@ -578,7 +580,7 @@ async def do_thing(param: str) -> dict:
 - Sync functions are skipped (only async)
 
 This is the mechanism that eliminates `@mcp.tool()` decorators. The
-decorator still runs internally — bootstrap calls `mcp.tool()(func)`
+decorator still runs internally — `App` calls `mcp.tool()(func)`
 for each discovered function.
 
 ## Middleware and Identity
@@ -787,19 +789,18 @@ server, without Docker, and without any cloud dependencies. The key is
 httpx's ASGI transport — it runs the full ASGI app in-memory:
 
 ```python
-from mcp_app.bootstrap import build_app
+from my_app import app
 import httpx
 
-app, mcp, store, config = build_app()
 transport = httpx.ASGITransport(app=app)
 client = httpx.AsyncClient(transport=transport, base_url="http://test")
 ```
 
-`build_asgi()` returns the complete ASGI app — same object that
-`my-app-mcp serve` gives to uvicorn. Giving it to httpx
-instead means the full stack runs in-process: tool discovery, middleware,
-admin endpoints, store wiring. No server process, no port binding, no
-cleanup.
+`App` is the ASGI callable directly — the same object that
+`my-app-mcp serve` gives to uvicorn and `uvicorn my_app:app` would
+invoke. Giving it to httpx instead means the full stack runs
+in-process: tool discovery, middleware, admin endpoints, store
+wiring. No server process, no port binding, no cleanup.
 
 **If it works in httpx ASGI transport, it works in uvicorn, it works in
 Docker.** The ASGI app is the app. Transport is just how bytes get in
@@ -816,14 +817,13 @@ Solutions should validate their tools and auth flow locally:
 import os
 import pytest
 import httpx
-from mcp_app.bootstrap import build_app
+from my_app import app
 
 @pytest.fixture
 def app_client(tmp_path):
-    """Build the full ASGI app and return an httpx client."""
+    """Return an httpx client that runs the full ASGI app in-process."""
     os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
     os.environ["SIGNING_KEY"] = "test-key"
-    app, mcp, store, config = build_app()
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 

@@ -944,13 +944,12 @@ dependency of mcp-app — the solution gets it for free.
 import httpx
 import jwt as pyjwt
 from datetime import datetime, timezone, timedelta
-from mcp_app.bootstrap import build_app
+from my_app import app
 
 @pytest.fixture
 def app_client(tmp_path):
     os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
     os.environ["SIGNING_KEY"] = "test-key"
-    app, mcp, store, config = build_app()
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 

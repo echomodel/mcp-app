@@ -317,18 +317,17 @@ Gated by admin-scoped JWT (`scope: "admin"`, same signing key).
 Validate the full stack in-memory — no server, no Docker, no cloud:
 
 ```python
-from mcp_app.bootstrap import build_asgi
-from my_app.mcp import tools
+from my_app import app
 import httpx
 
-app, mcp, store = build_asgi("my-app", tools)
 transport = httpx.ASGITransport(app=app)
 client = httpx.AsyncClient(transport=transport, base_url="http://test")
 ```
 
-`build_asgi()` returns the same ASGI app the CLI gives to uvicorn.
-httpx runs it in-process. If it works here, it works in Docker.
-httpx is already a dependency of mcp-app.
+`App` is directly ASGI-callable, so any ASGI host — httpx in-process,
+uvicorn, hypercorn, granian, Mangum for Lambda — treats it as the
+server callable without wrapping. If it works here, it works in
+Docker. httpx is already a dependency of mcp-app.
 
 See CONTRIBUTING.md for full test examples.
 

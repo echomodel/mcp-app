@@ -9,8 +9,7 @@ import httpx
 def health_client(app, tmp_path):
     os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
     os.environ["SIGNING_KEY"] = "tck-test-key-32chars-minimum-len!!"
-    asgi_app, mcp, store = app.build_asgi()
-    transport = httpx.ASGITransport(app=asgi_app)
+    transport = httpx.ASGITransport(app=app)
     yield httpx.AsyncClient(transport=transport, base_url="http://test")
     os.environ.pop("APP_USERS_PATH", None)
     os.environ.pop("SIGNING_KEY", None)

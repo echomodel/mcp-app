@@ -32,8 +32,7 @@ def http_env(tmp_path):
 
 @pytest.fixture
 def asgi_client(app, http_env):
-    asgi_app, mcp, store = app.build_asgi()
-    transport = httpx.ASGITransport(app=asgi_app)
+    transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 

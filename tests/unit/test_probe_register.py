@@ -52,13 +52,14 @@ def _mcp_app_components(store, monkeypatch):
     finally:
         sys.path.pop(0)
 
-    from mcp_app.bootstrap import build_asgi
+    from mcp_app import App
     monkeypatch.setenv("SIGNING_KEY", SIGNING_KEY)
-    app, mcp, _ = build_asgi("test", tools)
+    app = App(name="test", tools_module=tools)
+    app._asgi = app._build_asgi()
     transport = httpx.ASGITransport(app=app)
     http_client = httpx.AsyncClient(transport=transport, base_url=BASE_URL)
     adapter = RemoteAuthAdapter(BASE_URL, SIGNING_KEY, http_client=http_client)
-    return adapter, mcp
+    return adapter, app._mcp
 
 
 @pytest.fixture

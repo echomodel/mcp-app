@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from types import ModuleType
 
 import click
 
@@ -334,20 +333,12 @@ def _get_auth_store(app_name: str):
         )
 
 
-def create_mcp_cli(app_name: str, tools_module: ModuleType | None = None) -> click.Group:
+def create_mcp_cli(app) -> click.Group:
     """Create the MCP server CLI for an app (serve, stdio).
 
-    Args:
-        app_name: App name (server name, store paths).
-        tools_module: Python module containing async tool functions.
-            If None, imported as {app_name}.mcp.tools.
-
-    Usage:
-        from my_app.mcp import tools
-        mcp_cli = create_mcp_cli("my-app", tools_module=tools)
-
-        # or with convention (single-package):
-        mcp_cli = create_mcp_cli("my-app")
+    The subcommands are thin wrappers over ``app.serve()`` and
+    ``app.stdio(user)``; the same methods can be called directly
+    from Python.
     """
 
     @click.group()
@@ -360,40 +351,15 @@ def create_mcp_cli(app_name: str, tools_module: ModuleType | None = None) -> cli
     @click.option("--port", default=8080, type=int)
     def serve(host, port):
         """Run MCP server over HTTP."""
-        import uvicorn
-        import mcp_app
-        from mcp_app.bootstrap import build_asgi
-
-        resolved = _resolve_tools(app_name, tools_module)
-        app, mcp, store = build_asgi(app_name, resolved)
-        mcp_app._store = store
-        uvicorn.run(app, host=host, port=port)
+        app.serve(host=host, port=port)
 
     @cli.command()
     @click.option("--user", required=True, help="User identity for this session.")
     def stdio(user):
         """Run MCP server over stdio."""
-        from mcp_app.bootstrap import run_stdio
-
-        resolved = _resolve_tools(app_name, tools_module)
-        run_stdio(app_name, resolved, user)
+        app.stdio(user)
 
     return cli
-
-
-def _resolve_tools(app_name: str, tools_module: ModuleType | None) -> ModuleType:
-    """Resolve tools module — use provided or import by convention."""
-    if tools_module is not None:
-        return tools_module
-    import importlib
-    module_name = f"{app_name.replace('-', '_')}.mcp.tools"
-    try:
-        return importlib.import_module(module_name)
-    except ImportError:
-        raise click.ClickException(
-            f"Could not import tools module '{module_name}'. "
-            f"Pass tools_module explicitly to create_mcp_cli()."
-        )
 
 
 def create_admin_cli(app_name: str) -> click.Group:
