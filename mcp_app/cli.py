@@ -236,6 +236,24 @@ def users_update_profile(email, key, value):
     click.echo(f"Updated {key} for {email}")
 
 
+@users.command("get-profile")
+@click.argument("email")
+@click.option("--json", "as_json", is_flag=True, help="JSON output.")
+def users_get_profile(email, as_json):
+    """Read a user's profile."""
+    record = _run(_client().get_full(email))
+    if not record:
+        raise click.ClickException(f"User not found: {email}")
+    profile = record.profile
+    if as_json:
+        click.echo(json.dumps(profile, indent=2))
+    elif profile is None:
+        click.echo("(no profile)")
+    else:
+        for k, v in profile.items():
+            click.echo(f"  {k}: {v}")
+
+
 @users.command("revoke")
 @click.argument("email")
 def users_revoke(email):
@@ -536,6 +554,35 @@ def create_admin_cli(app_name: str) -> click.Group:
                 updates = _validate_profile(updates)
             _run(store.update_profile(email, updates))
             click.echo(f"Updated profile for {email}")
+
+    @users.command("get-profile")
+    @click.argument("email")
+    @click.option("--json", "as_json", is_flag=True, help="JSON output.")
+    def users_get_profile(email, as_json):
+        """Read a user's profile."""
+        store = _get_auth_store(app_name)
+        record = _run(store.get_full(email))
+        if not record:
+            raise click.ClickException(f"User not found: {email}")
+        profile = record.profile
+        if as_json:
+            click.echo(json.dumps(profile, indent=2))
+            return
+        if profile is None:
+            click.echo("(no profile)")
+            return
+        if model:
+            for fname in model.model_fields:
+                if fname in profile:
+                    click.echo(f"  {fname}: {profile[fname]}")
+                else:
+                    click.echo(f"  {fname}: (missing)")
+            extras = [k for k in profile if k not in model.model_fields]
+            for k in extras:
+                click.echo(f"  {k}: {profile[k]}  (not in profile model)")
+        else:
+            for k, v in profile.items():
+                click.echo(f"  {k}: {v}")
 
     @users.command("revoke")
     @click.argument("email")

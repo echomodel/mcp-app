@@ -80,7 +80,7 @@ from mcp_app import App
 from my_app.mcp import tools
 
 class Profile(BaseModel):
-    token: str = Field(description="API token from https://example.com/settings")
+    api_key: str = Field(description="API key from https://example.com/settings")
 
 app = App(
     name="my-app",
@@ -90,7 +90,7 @@ app = App(
 )
 ```
 
-`profile_expand=True` generates typed CLI flags (`--token`) on
+`profile_expand=True` generates typed CLI flags (`--api-key`) on
 the admin CLI. `profile_expand=False` (default) accepts profile
 as JSON or `@file`.
 
@@ -172,13 +172,13 @@ import httpx
 class MySDK:
     def list_items(self):
         user = current_user.get()
-        token = user.profile["token"]
+        api_key = user.profile["api_key"]
         resp = httpx.get("https://api.example.com/items",
-                         headers={"Authorization": f"Bearer {token}"})
+                         headers={"Authorization": f"Bearer {api_key}"})
         return resp.json()
 ```
 
-The SDK reads `current_user.get().profile` for the backend credential. The profile was saved at registration time and loaded in one read with the auth record.
+The SDK reads `current_user.get().profile` for whatever it needs. The profile was saved at registration time and loaded in one read with the auth record.
 
 **What's identical:** store setup, admin endpoints, tool discovery, deployment. The middleware is the same. The SDK decides what to read from the user context.
 
@@ -244,46 +244,64 @@ user.profile     # dict or typed Pydantic model — whatever was saved at regist
 
 ### Profile
 
-The user record includes an optional `profile` field — app-specific data saved at registration time (backend credentials, preferences, config). mcp-app stores it and loads it but does not interpret it.
+The user record includes an optional `profile` field — whatever
+per-user data the app wants to attach: backend credentials,
+preferences, configuration, defaults. mcp-app stores it and loads
+it but does not interpret it. There is no "profile schema" at
+the framework level — each app declares its own.
 
 For typed profile access, the app declares a Pydantic model on
-the `App` object:
+the `App` object. A credential-bearing example for an API-proxy
+app:
 
 ```python
-# my_app/__init__.py
-from pydantic import BaseModel, Field
-from mcp_app import App
-from my_app.mcp import tools
-
 class Profile(BaseModel):
-    token: str = Field(description="Personal access token from https://example.com/settings")
+    api_key: str = Field(description="API key from https://example.com/settings")
 
 app = App(name="my-app", tools_module=tools, profile_model=Profile, profile_expand=True)
 ```
 
-Now `user.profile.token` is typed and validated. If no model is
-registered, `user.profile` is a raw dict.
+A non-credential example for a data-owning app that wants per-user
+preferences:
+
+```python
+class Profile(BaseModel):
+    display_name: str = Field(description="Name shown on shared content")
+    default_region: str = Field(description="Region for new entries, e.g. 'us-east'")
+
+app = App(name="my-app", tools_module=tools, profile_model=Profile, profile_expand=True)
+```
+
+Both shapes are equally valid — same machinery, different content.
+`user.profile.api_key` or `user.profile.display_name` is typed
+and validated. If no model is registered, `user.profile` is a
+raw dict.
 
 **Field descriptions are how the app tells operators (and agents)
-what credentials it needs.** When `profile_expand=True`, the admin
+what each field is for.** When `profile_expand=True`, the admin
 CLI generates typed flags from the model — the field name becomes
 the flag, the description becomes the help text. An operator
 running `my-app-admin users add --help` sees exactly what to
 provide and where to get it, without reading the source code.
-This is the re-discovery mechanism: months later, when a token
-needs rotating, the CLI tells you what each field is for.
+This is the re-discovery mechanism: months later, when a value
+needs updating, the CLI tells you what each field is for.
 
 ### User registration with profile
 
 ```bash
-# Data-owning app — no profile needed
+# No profile needed
 my-app-admin users add alice@example.com
 
-# API-proxy app — profile set at registration via typed flags
-my-app-admin users add alice@example.com --token api-key-xxx
+# Profile set at registration via typed flags (whatever the model declares)
+my-app-admin users add alice@example.com --api-key xxx-yyy-zzz
+my-app-admin users add bob@example.com --display-name "Bob" --default-region us-east
 
-# Update a single profile field later (e.g., rotate a credential)
-my-app-admin users update-profile alice@example.com token new-api-key
+# Update a single profile field later
+my-app-admin users update-profile alice@example.com api_key new-key
+my-app-admin users update-profile bob@example.com default_region eu-west
+
+# Read the current profile (e.g., to verify what's stored)
+my-app-admin users get-profile alice@example.com
 ```
 
 `users add` rejects existing users — use `users update-profile`
@@ -307,6 +325,8 @@ REST admin endpoints are mounted at `/admin` in HTTP mode:
 
 - `POST /admin/users` — register user (with optional profile), returns JWT
 - `GET /admin/users` — list users
+- `GET /admin/users/{email}/profile` — read a user's profile
+- `PATCH /admin/users/{email}/profile` — merge fields into a user's profile
 - `DELETE /admin/users/{email}` — revoke user
 - `POST /admin/tokens` — issue new token for existing user
 
@@ -457,7 +477,8 @@ Any deployment environment must provide:
 - **Health check:** `GET /health` — no auth, returns
   `{"status": "ok"}`
 - **Admin API:** `/admin/users` (POST, GET),
-  `/admin/users/{email}` (DELETE), `/admin/tokens` (POST)
+  `/admin/users/{email}` (DELETE), `/admin/users/{email}/profile`
+  (GET, PATCH), `/admin/tokens` (POST)
 - **Auth model:** mcp-app handles its own auth via JWT. If the
   platform has an auth gate (IAM, API gateway, etc.), configure
   it to allow unauthenticated traffic through to the app
@@ -588,12 +609,18 @@ remembers the last one configured.
 ### Managing users
 
 ```bash
-# Register users
+# Register users (profile fields are app-specific — see the app's Pydantic model)
 my-app-admin users add alice@example.com
-my-app-admin users add bob@example.com --profile '{"token": "api-key-xxx"}'
+my-app-admin users add bob@example.com --profile '{"api_key": "xxx-yyy-zzz"}'
 
 # List users
 my-app-admin users list
+
+# Read a user's profile
+my-app-admin users get-profile alice@example.com
+
+# Update a single profile field
+my-app-admin users update-profile alice@example.com api_key new-key
 
 # Revoke a user (invalidates all their tokens)
 my-app-admin users revoke alice@example.com

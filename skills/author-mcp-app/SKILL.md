@@ -158,9 +158,10 @@ files, no framework imports in your tool code.
 - **User management out of the box.** REST admin endpoints
   (`POST /admin/users`, `GET /admin/users`,
   `DELETE /admin/users/{email}`, `POST /admin/tokens`,
+  `GET /admin/users/{email}/profile`,
   `PATCH /admin/users/{email}/profile`) — user registration
   with optional profile data, listing, revocation, token
-  issuance, and profile updates with no code.
+  issuance, and profile reads/updates with no code.
 
 - **Per-user data storage.** `filesystem` store (default) provides
   per-user JSON under XDG-compliant paths. Custom stores plug in
@@ -445,7 +446,7 @@ from mcp_app import App
 from my_solution.mcp import tools
 
 class Profile(BaseModel):
-    token: str = Field(description="API token from https://example.com/settings")
+    api_key: str = Field(description="API key from https://example.com/settings")
 
 app = App(
     name="my-solution",
@@ -454,6 +455,12 @@ app = App(
     profile_expand=True,
 )
 ```
+
+The field name `api_key` here is illustrative — profile is whatever
+the app declares. A data-owning app might instead store user
+preferences (`display_name`, `default_region`, etc.) on the profile,
+or skip the profile entirely if it has nothing per-user beyond
+identity.
 
 **Data-owning app** (no per-user credentials — just identity):
 
@@ -579,7 +586,7 @@ class MySDK:
     @classmethod
     def _client(cls):
         user = current_user.get()
-        return MyClient(token=user.profile.token)
+        return MyClient(api_key=user.profile.api_key)
 
     @classmethod
     async def list_items(cls) -> dict:
@@ -680,9 +687,9 @@ import httpx
 class MySDK:
     def list_items(self):
         user = current_user.get()
-        token = user.profile.token  # typed via Pydantic
+        api_key = user.profile.api_key  # typed via Pydantic
         resp = httpx.get("https://api.example.com/items",
-                         headers={"Authorization": f"Bearer {token}"})
+                         headers={"Authorization": f"Bearer {api_key}"})
         return resp.json()
 ```
 
@@ -700,7 +707,7 @@ from mcp_app import App
 from my_solution.mcp import tools
 
 class Profile(BaseModel):
-    token: str = Field(description="Personal access token from https://example.com/settings")
+    api_key: str = Field(description="API key from https://example.com/settings")
 
 app = App(
     name="my-solution",
@@ -710,7 +717,13 @@ app = App(
 )
 ```
 
-`profile_expand=True` generates typed CLI flags (`--token`).
+A data-owning app might declare a different shape entirely —
+`display_name`, `default_region`, or whatever per-user config it
+needs. mcp-app does not interpret the profile; the app owns
+both the model and the meaning.
+
+`profile_expand=True` generates typed CLI flags from the model
+(e.g., `--api-key` from the example above).
 `profile_expand=False` accepts the profile as a JSON blob or `@file`.
 Profile registration happens automatically when the `App` is
 constructed — no separate `register_profile()` call needed.
@@ -733,12 +746,13 @@ code or documentation needed. This is the re-discovery path:
 months later, when a token needs rotating, the CLI tells you
 what each field is for.
 
-**When building an API-proxy app, always include
-`Field(description=...)` on every profile field.** A bare
-`token: str` works mechanically but gives operators nothing
-to work with when they encounter the field in a CLI or admin
-tool. A good description answers: what is this, what system
-does it authenticate to, and where do I get one.
+**Always include `Field(description=...)` on every profile field.**
+A bare `api_key: str` works mechanically but gives operators
+nothing to work with when they encounter the field in a CLI or
+admin tool. For credentials, a good description answers: what is
+this, what system does it authenticate to, and where do I get one.
+For non-credential fields, describe what the value controls and
+what valid values look like.
 
 **Propagate this into the implementing app.** When creating or
 reviewing an API-proxy app:
@@ -752,10 +766,10 @@ reviewing an API-proxy app:
    self-documentation when adding or changing profile fields.
 
 These are not optional polish — they are the re-discovery
-mechanism. Without descriptions, an operator rotating a
-credential six months later sees `--token` in `--help` with
-no explanation of what token, for what system, or where to
-get a new one.
+mechanism. Without descriptions, an operator returning to the
+app months later sees `--api-key` (or whatever the field is)
+in `--help` with no explanation of what the value is for, what
+system it connects to, or where to get a new one.
 
 ### User management
 
@@ -810,15 +824,27 @@ the Pydantic model's fields:
 
 ```bash
 # Typed key (expand=True) — key is validated, tab-completable
-my-solution-admin users update-profile alice@example.com token new-api-key
+my-solution-admin users update-profile alice@example.com api_key new-key
+my-solution-admin users update-profile bob@example.com default_region eu-west
 
 # JSON merge (expand=False or no profile model)
-my-solution-admin users update-profile alice@example.com '{"token": "new-key"}'
+my-solution-admin users update-profile alice@example.com '{"api_key": "new-key"}'
 ```
 
 Use `update-profile` to rotate backend credentials, refresh
 OAuth tokens, or change any per-user setting without
 re-registering the user.
+
+**`users get-profile`** reads the current profile. With a
+registered profile model, the per-app CLI shows every declared
+field with its value or `(missing)`, and tags any extra stored
+keys as `(not in profile model)` — useful for verifying what's
+actually stored before or after a rotation.
+
+```bash
+my-solution-admin users get-profile alice@example.com
+my-solution-admin users get-profile alice@example.com --json
+```
 
 ### Environment variables
 
@@ -966,11 +992,11 @@ async def test_register_and_call_tool(app_client):
     resp = await app_client.post(
         "/admin/users",
         json={"email": "user@example.com",
-              "profile": {"token": "test-api-key"}},
+              "profile": {"api_key": "test-key"}},
         headers=headers,
     )
     assert resp.status_code == 200
-    assert "token" in resp.json()
+    assert "token" in resp.json()  # the mcp-app JWT for this user
 ```
 
 ### Step 3: stdio validation
@@ -1102,7 +1128,7 @@ Any deployment target must provide:
 - **Health check:** `GET /health` — no auth required, returns
   `{"status": "ok"}`
 - **Admin API:** `POST/GET /admin/users`, `DELETE /admin/users/{email}`,
-  `PATCH /admin/users/{email}/profile`, `POST /admin/tokens` —
+  `GET/PATCH /admin/users/{email}/profile`, `POST /admin/tokens` —
   all require admin auth via signing key
 - **Auth model:** the app handles its own auth via JWT. If the
   platform has its own auth gate (e.g., IAM, API gateway), it
@@ -1518,13 +1544,16 @@ this section alone:
 Concrete commands for this app's profile shape:
 
 - `users add` with this app's actual profile flags
-  (`--token`, `--api-key`, whatever the Pydantic model
-  declares). Show a real-looking invocation.
+  (`--api-key`, `--display-name`, `--default-region`,
+  whatever the Pydantic model declares — credentials,
+  preferences, or anything else). Show a real-looking
+  invocation.
 - How to discover profile fields from the CLI itself
   (`users add --help`) — this is the self-documentation
   path for agents operating the app
-- `users update-profile` to rotate a specific credential
+- `users update-profile` to change a specific field
   without re-registering
+- `users get-profile` to read what's currently stored
 - `users list`, `users revoke`, `tokens create`
 - Where to obtain the backend credential for this app's
   profile fields (the URL users visit to generate an API
@@ -1626,8 +1655,8 @@ reader needs to navigate. Coherent product, not history exposé.
 ## Manage users
 
 <users add with this app's actual flags>
-<users update-profile, users list, users revoke, tokens create>
-<where to obtain backend credentials if API-proxy>
+<users get-profile, users update-profile, users list, users revoke, tokens create>
+<where to obtain backend credentials if API-proxy, or what each preference field controls>
 
 ## Verify and register MCP clients
 

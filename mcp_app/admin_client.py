@@ -106,10 +106,21 @@ class RemoteAuthAdapter:
         record = await self.get(email)
         if not record:
             return None
+        resp = await self._http.get(
+            f"{self.base_url}/admin/users/{email}/profile",
+            headers=self._headers(),
+            timeout=10,
+        )
+        profile = None
+        if resp.status_code == 200:
+            profile = resp.json().get("profile")
+        elif resp.status_code != 404:
+            resp.raise_for_status()
         return UserRecord(
             email=record.email,
             created=record.created,
             revoke_after=record.revoke_after,
+            profile=profile,
         )
 
     async def list(self) -> list[UserAuthRecord]:
