@@ -526,13 +526,16 @@ def create_admin_cli(app_name: str) -> click.Group:
         def users_update_profile(email, key, value):
             __doc__ = "\n".join(help_lines)
             store = _get_auth_store(app_name)
-            existing = _run(store.get(email))
+            existing = _run(store.get_full(email))
             if not existing:
                 raise click.ClickException(f"User not found: {email}")
-            # Validate the single field through the Pydantic model
-            test_data = {key: value}
-            validated = _validate_profile(test_data)
-            _run(store.update_profile(email, validated))
+            # Validate against the merged post-update state so models with
+            # multiple required fields (or cross-field validators) accept
+            # partial patches against an already-complete profile.
+            existing_profile = existing.profile or {}
+            merged = {**existing_profile, key: value}
+            _validate_profile(merged)
+            _run(store.update_profile(email, {key: value}))
             click.echo(f"Updated {key} for {email}")
 
         users_update_profile.help = "\n".join(help_lines)
@@ -546,12 +549,14 @@ def create_admin_cli(app_name: str) -> click.Group:
             DATA is a JSON string or @file with fields to merge.
             """
             store = _get_auth_store(app_name)
-            existing = _run(store.get(email))
+            existing = _run(store.get_full(email))
             if not existing:
                 raise click.ClickException(f"User not found: {email}")
             updates = _parse_profile_value(data)
             if model:
-                updates = _validate_profile(updates)
+                existing_profile = existing.profile or {}
+                merged = {**existing_profile, **updates}
+                _validate_profile(merged)
             _run(store.update_profile(email, updates))
             click.echo(f"Updated profile for {email}")
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-app"
-version = "0.3.0"
+version = "0.3.1"
 description = "Config-driven MCP application framework with auth, middleware, and data stores"
 requires-python = ">=3.11"
 dependencies = [

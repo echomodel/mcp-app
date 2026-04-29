@@ -475,6 +475,26 @@ flags from the model fields (e.g., `--token`). When registered with
 `expand=False`, the CLI accepts the profile as a JSON string or
 `@file`.
 
+### Partial-update validation runs against the merged profile
+
+`users update-profile` is a partial-update operation: the user
+provides one (or a few) field(s) to change, and the rest of the
+stored profile is preserved. To make this work for profile models
+with multiple required fields (and for cross-field
+`model_validator`s), the CLI loads the existing stored profile,
+merges the patch on top, and validates the **merged** result —
+not the patch dict alone.
+
+This means model validators see the actual post-update state and
+can correctly reject patches that would leave the profile in an
+invalid combined shape. Conversely, patches missing other required
+fields are not rejected when the existing record already supplies
+them.
+
+The store layer still receives only the delta — the merge happens
+again at the storage layer, where it has always merged correctly.
+The CLI's merge is purely about validation.
+
 ### SIGNING_KEY has no default
 
 Earlier versions defaulted to `"dev-key"`. This was removed because
