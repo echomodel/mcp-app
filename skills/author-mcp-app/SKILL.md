@@ -1001,9 +1001,51 @@ async def test_register_and_call_tool(app_client):
 
 ### Step 3: stdio validation
 
+Unit and framework tests don't exercise the real MCP transport.
+Drive at least one tool through stdio end-to-end before declaring
+the app ready.
+
+**Use a throwaway project directory** so the test registration
+doesn't pollute your user-scope or working-project MCP configs:
+
 ```bash
+mkdir -p /tmp/my-solution-smoketest && cd /tmp/my-solution-smoketest
 claude mcp add my-solution -- my-solution-mcp stdio --user local
+claude mcp list | grep my-solution   # expect ✓ Connected
 ```
+
+Project-scoped registration in `/tmp/<name>-smoketest` is throwaway
+by design — `rm -rf` the dir to undo, no `claude mcp remove`
+gymnastics, and your real configs stay clean.
+
+**Drive a real tool call non-interactively:**
+
+```bash
+claude -p "Use my-solution to <do the simplest read-only thing> and report the result" \
+    --allowedTools "mcp__my-solution__<read_only_tool_name>"
+```
+
+Pick a read-only tool (list, get, search) — no mutation, no cost
+beyond the API roundtrip. The `--allowedTools` flag scopes the
+agent so it can't fall back to other MCP tools or shell commands;
+if the prompt succeeds, it's because the stdio transport
+round-tripped successfully.
+
+**Reading the result:**
+
+- Tool returns data → registration and the full SDK code path
+  work end-to-end.
+- Tool returns an **error envelope** (e.g. "no access token
+  configured for your profile") → the transport works; only the
+  app-level state (user record, credentials) is incomplete.
+  That's still a passing transport check.
+- `claude -p` errors before any tool call (server failed to
+  start, command not found, args rejected) → registration is
+  broken. Fix before moving on.
+
+This recipe also works for verifying any *deployed* instance —
+register HTTP transport instead and run the same `claude -p`
+prompt.
 
 ### Step 4: Run tests
 
