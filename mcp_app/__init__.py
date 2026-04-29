@@ -1,5 +1,7 @@
 """mcp-app: Config-driven MCP application framework."""
 
+__version__ = "0.3.0"
+
 from mcp_app.app import App
 from mcp_app.context import current_user, register_profile
 from mcp_app.data_store import UserDataStore, FileSystemUserDataStore
