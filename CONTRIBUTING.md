@@ -199,6 +199,57 @@ skill uses this as its final step: adopt the test suite, run it,
 confirm zero failures. If it passes, auth works, admin works,
 tools are wired, identity is enforced.
 
+## Version Management
+
+**Single source of truth:** `mcp_app/__init__.py` contains
+`__version__`. `pyproject.toml` mirrors it. Both must move
+together in the same commit.
+
+### When to bump
+
+Bump in the same commit as the change. `pip install --upgrade`
+and `pipx install --upgrade` only re-install when the version
+number rises, so without a bump downstream installs stay on the
+old code.
+
+| Change type | Bump |
+|-------------|------|
+| Bug fix, internal cleanup | patch (0.3.0 → 0.3.1) |
+| New endpoint, new CLI command, new framework feature | minor (0.3.0 → 0.4.0) |
+| Removed/renamed admin endpoint, change to `App` constructor signature, change to admin REST contract, breaking change in `mcp_app.testing` | major (0.3.0 → 1.0.0) |
+
+Documentation-only changes don't need a bump.
+
+The conformance suite (`mcp_app.testing`) is part of the public
+contract — implementing apps import its modules in their
+framework tests. Any change that breaks an existing import or
+test name is a major bump.
+
+### Catch-up bumps
+
+If a runtime-touching change shipped without a bump (the rule was
+missed), fix it with a small follow-up commit titled
+`Bump version to X.Y.Z`. No `chore:` prefix, no Conventional
+Commits ceremony — mcp-app does not run `semantic-release` or
+similar tooling. The commit body should briefly note what
+unreleased changes the bump covers.
+
+### Release workflow
+
+```bash
+# 1. Update __version__ in mcp_app/__init__.py
+# 2. Update version in pyproject.toml to match
+# 3. Commit (bump together with the change, OR as a catch-up commit)
+git add mcp_app/__init__.py pyproject.toml <other-files>
+git commit -m "<change description>"
+
+# 4. Tag (annotated)
+git tag -a vX.Y.Z -m "vX.Y.Z"
+
+# 5. Push (with tags)
+git push origin main && git push origin vX.Y.Z
+```
+
 ## Architectural Decisions
 
 ### Agent-composed over provider-coupled (admin tools)
