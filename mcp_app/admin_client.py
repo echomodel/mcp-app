@@ -4,6 +4,8 @@ Connects to a deployed mcp-app instance's /admin REST endpoints.
 Mints admin JWTs locally using the signing key.
 """
 
+from __future__ import annotations
+
 from datetime import datetime, timezone, timedelta
 
 import httpx
