@@ -845,11 +845,12 @@ tool. Your app is correctly built on mcp-app.
 
 Two agent skills ship with this repo under `skills/`:
 
-- **`author-mcp-app`** — guides authoring, migration, review,
-  and framework-upgrade work on mcp-app solutions.
-- **`mcp-app-admin`** — guides operators and agents managing
-  deployed mcp-app instances (connect, verify, users, tokens,
-  MCP client registration).
+- **[`author-mcp-app`](skills/author-mcp-app/SKILL.md)** —
+  guides authoring, migration, review, and framework-upgrade
+  work on mcp-app solutions.
+- **[`mcp-app-admin`](skills/mcp-app-admin/SKILL.md)** — guides
+  operators and agents managing deployed mcp-app instances
+  (connect, verify, users, tokens, MCP client registration).
 
 ### Installing the skills
 

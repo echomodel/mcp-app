@@ -123,35 +123,109 @@ stay the authoritative source for framework contributors; the
 skill is the authoritative source for agents authoring or
 operating apps elsewhere.
 
-### Known duplications
+### Audiences
 
-Because tiers 1 and 2 serve overlapping audiences from
-different contexts, some duplication is intentional and must
-be kept in sync on every change:
+Each artifact serves a primary audience. Cross-audience
+content is fine but secondary — the artifact's *primary*
+audience determines tone, depth, and what counts as
+"complete." The legend used in the charter table below:
 
-| Content | Framework README | `author-mcp-app` | `mcp-app-admin` |
-|---------|-----------------|-----------------|----------------|
-| Runtime contract (env vars, endpoints, start command) | Full | Full | Referenced |
-| Environment variables table | Full | Full | Referenced |
-| User management CLI commands | Full | Full | Full |
-| Post-deploy verification (probe, register) | Summary | Summary | Full |
-| Six-rung verification ladder (probe → tools → safe-tool) | Summary | Summary | Full |
-| `SafeTool` authoring guidance (low-info-density rules) | Summary | Full | Pointer |
-| Signing-key retrieval | Summary | Pointer | Full |
-| Deployment-agnostic posture | Full | Full | Implicit |
-| Six-journey map | Not present | Full | Journeys 4–6 |
-| Admin endpoint list | Full | Referenced | Referenced |
+- **H** — humans reading the README to evaluate, install, and
+  use mcp-app or an mcp-app solution. They are looking at the
+  rendered repo on GitHub or in their editor.
+- **AA** — *author agents*: AI coding agents loading the
+  `author-mcp-app` skill while working on an implementing app's
+  repo. They do not have mcp-app's README in context.
+- **OA** — *operator agents*: AI coding agents loading the
+  `mcp-app-admin` skill to operate a deployed mcp-app instance.
+  They also do not have mcp-app's README in context.
 
-"Full" = authoritative source for that audience. "Summary" =
-compressed for context but complete enough to act. "Pointer" =
-brief mention directing to where the authoritative content
-lives (only works when co-packaged, e.g., framework README ↔
-same-repo skill — never across agent contexts).
+The skills are self-contained because of AA and OA: an agent
+loaded into a different repo cannot follow "see the README"
+links — the README isn't there. So duplication between README
+and skills is intentional. The charter assigns one *canonical
+source of truth* per topic; other artifacts may carry "Full"
+treatment too if their audience needs the full content
+in-context, "Summary" if a compressed version suffices, or
+"Pointer" if the audience is co-located with the canonical
+source.
 
-When changing anything in the "Full" cells, update all
-"Full" instances across tiers in the same commit. "Summary"
-and "Pointer" instances may be revised to match but don't
-generally need to track every edit.
+### Charter — single source of truth per topic
+
+This is the explicit charter for which artifact owns each
+topic. The "SoT" (source of truth) column is authoritative for
+maintenance: when content changes, the SoT moves first; other
+artifacts are reconciled to it. Each row represents an
+identifiable topic an agent or human might look up.
+
+Legend for the per-artifact columns:
+
+- **Full** — complete, self-contained treatment.
+- **Summary** — compressed but actionable; reader can act
+  without needing the SoT in front of them.
+- **Pointer** — brief mention plus a forward link/section
+  reference. Only works when the consuming audience has the SoT
+  loaded (e.g., human reading the same repo).
+- **Referenced** — the artifact mentions the topic exists but
+  defers to the SoT. Equivalent to "Pointer" but for cases
+  where the audience may not have the SoT loaded — the
+  reference is informational only.
+- **Implicit** — the topic is enforced by the artifact's
+  posture or examples, not stated explicitly.
+- **—** — not present (and the audience doesn't need it).
+
+| Topic | SoT | README | `author-mcp-app` | `mcp-app-admin` |
+|-------|-----|--------|------------------|-----------------|
+| Value proposition / what mcp-app is | README | Full | Pointer | — |
+| Install (the framework) | README | Full | — | — |
+| Quick start (minimal app) | README | Full | Full | — |
+| Two app patterns (data-owning vs API-proxy) | README | Full | Full | Implicit |
+| Tool discovery rules | README | Full | Full | — |
+| Environment variables (canonical table) | README | Full | Full | Referenced |
+| User Identity and Profile (concept + ContextVar) | README | Full | Full | Referenced |
+| Profile model declaration (`profile_expand`, fields) | README | Full | Full | — |
+| Admin REST endpoints (the API contract) | README | Full | Referenced | Referenced |
+| `SafeTool` declaration (`App.safe_tool`) | README | Summary | Full | Referenced |
+| `SafeTool` authoring rules (low-info-density) | `author-mcp-app` | Summary | Full | Pointer |
+| `tools` subcommand group (CLI shape) | README | Summary | Referenced | Full |
+| Local testing (httpx ASGI transport) | README | Full | Full | — |
+| Running the server (stdio + HTTP) | README | Full | Summary | — |
+| Runtime contract (start command, ports, endpoints) | README | Full | Full | Referenced |
+| Deployment posture (agnostic-default, opinionated alt.) | README | Full | Full | Implicit |
+| Docker / Cloud platform examples | README | Full | Pointer | — |
+| Post-deploy verification ladder (probe → tools → safe-tool) | `mcp-app-admin` | Summary | Summary | Full |
+| Six-journey map | `author-mcp-app` | — | Full | Journeys 4–6 |
+| Connect — local vs remote, generic vs per-app CLI | `mcp-app-admin` | Summary | Pointer | Full |
+| User management CLI commands (operational) | `mcp-app-admin` | Summary | Pointer | Full |
+| Token lifecycle (issuance, revocation, rotation) | `mcp-app-admin` | — | — | Full |
+| Signing-key retrieval per deploy tool | `mcp-app-admin` | — | Pointer | Full |
+| Troubleshooting decision tree | `mcp-app-admin` | — | — | Full |
+| MCP client configuration (stdio + HTTP examples) | README | Full | Pointer | Referenced |
+| `register` command output handling | README | Full | Full (auth-side) | Full (ops-side) |
+| Architecture (FastMCP+Starlette wrap, ASGI) | README | Full | Pointer | — |
+| Free tests / conformance suite (how to adopt) | README | Full | Full | — |
+| Conformance suite internals (how it's built) | CONTRIBUTING | — | — | — |
+| Architectural decisions and rationale | CONTRIBUTING | — | — | — |
+| Framework contributor workflow (release, tests) | CONTRIBUTING | — | — | — |
+| Skill installation, scope, when to invoke | README | Full | — | — |
+| Skill self-obsolescence design goal | `author-mcp-app` | Summary | Full | Implicit |
+| Compliance checklist for implementing apps | `author-mcp-app` | — | Full | — |
+| Repository structure for implementing apps | `author-mcp-app` | — | Full | — |
+| Implementing app README skeleton + skeleton rules | `author-mcp-app` | — | Full | — |
+| Implementing app `CONTRIBUTING.md` guidance | `author-mcp-app` | — | Full | — |
+| Test patterns (httpx ASGI walk-throughs) | `author-mcp-app` | Summary | Full | — |
+| Pre-deploy `gitignore` baseline | `author-mcp-app` | — | Full | — |
+
+When changing the SoT for a topic, the change must reach every
+other artifact that carries "Full" or "Summary" treatment in
+the same PR. "Pointer" and "Referenced" cells track the SoT
+naturally when contributors update the link target, and
+"Implicit" cells need only be reviewed when the change shifts
+the artifact's posture.
+
+When a topic is missing from the table, that's a charter gap —
+the contributor adding the topic must update this table in the
+same PR.
 
 ### Single-sourced where feasible
 
