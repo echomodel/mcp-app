@@ -57,16 +57,34 @@ for this skill:
    rotates backend credentials via `users update-profile`,
    revokes access, issues new tokens. Profile field names and
    descriptions drive CLI help text.
-6. **Verify end-to-end and register MCP clients** — operator
-   runs `probe` to confirm the deployment serves tools,
-   `register` to emit MCP client configuration commands
-   (Claude Code, Gemini CLI, Claude.ai URL).
+6. **Sanity-check the deployment, connect end users** — split
+   into two phases with different audiences:
+   - **6a. Sanity-check the deployment** (admin only) — operator
+     runs `probe` to confirm the deployment is healthy
+     end-to-end (auth, MCP layer, tool listing). Independent of
+     any specific user.
+   - **6b. Connect an end user** (admin → end-user handoff) —
+     operator runs `register --user <email>` to mint a token and
+     produce the exact commands the end user pastes into their
+     MCP client (Claude Code, Gemini CLI, or Claude.ai web). The
+     admin and end user may be the same person (self-serve) or
+     different people; either way, the output of `register` is
+     consumed by an end-user-on-their-laptop persona, not the
+     admin persona.
 
 The developer typically walks all six during initial release;
 the operator returns to journeys 4–6 for every credential
 rotation, user addition, or deployment update. Docs must make
 the returning operator's path frictionless — they land cold,
 months later, without the skills loaded.
+
+**Persona note.** Journeys 1, 2, and 6b have an end-user audience
+(the person who will actually invoke tools from their MCP client).
+Journeys 3, 4, 5, and 6a have an admin/operator audience. When the
+same person plays both roles (the common case for personal
+deployments), the docs must make hopping between the two halves
+easy — see the "Bridging admin and end-user content" guidance
+below.
 
 ## Design goal: self-obsolescence for the solution repo
 
@@ -1738,17 +1756,52 @@ Concrete commands for this app's profile shape:
   model. Both exist for different audiences — CLI help
   for operators mid-task, README for operators onboarding.
 
-**6. Verify end-to-end and register MCP clients**
+**6. Sanity-check the deployment, connect end users**
 
 - `my-app-admin probe` — what it checks and what good
-  output looks like
-- `my-app-admin register --user <email>` — generates
-  ready-to-paste commands for Claude Code, Gemini CLI,
-  Claude.ai URL form
+  output looks like (admin-only; independent of any user)
+- `my-app-admin register --user <email>` — generates the
+  per-client setup commands the end user runs to add the
+  deployment to their MCP client
 - Manual MCP client config as fallback (claude/gemini
   `mcp add` commands with HTTP transport, header-based
   auth, the `${VAR}` env expansion pattern that both
   clients support for keeping tokens out of config files)
+- **Optional: live-tool smoke test.** For verification that
+  goes deeper than `probe`, the implementing app's README may
+  surface `safe-tool --invoke` (when the app declares a
+  SafeTool) and/or `tools call <name>` for ad-hoc invocation
+  as optional steps. Both are native admin commands; see the
+  six-rung verification ladder and SafeTool authoring guidance
+  earlier in this skill.
+
+### Bridging admin and end-user content
+
+Several journeys hand off between an admin/operator audience and
+an end-user audience. The clearest example is journey 6b: the admin
+runs `register --user <email>`, which produces commands the *end
+user* runs on their own machine to add the deployment to their MCP
+client. Other handoffs work similarly — anywhere admin-produced
+output is consumed by an end user.
+
+When admin and end user are the same person doing both jobs (the
+common case for personal deployments), readers shouldn't have to
+hunt across non-adjacent README sections to follow the round trip.
+Use markdown anchor links to bridge the two halves:
+
+- **From admin sections forward to end-user sections.** When an
+  admin step produces output an end user runs, end the admin
+  subsection with a forward link to the end-user subsection that
+  explains what to do with it.
+- **From end-user sections back to admin prerequisites.** The
+  end-user section should stand alone for a real end user reading
+  it cold, but should reference what the admin must have already
+  done (e.g., "Your admin must have run `register --user <your-email>`
+  for you").
+- **Use the literal section heading** the agent will produce as
+  the link target. Markdown auto-generates anchors from headings
+  (lowercased, spaces to hyphens, punctuation stripped) — verify
+  the link resolves after writing.
 
 ### Principles for distilling, not copying
 
@@ -1833,12 +1886,20 @@ reader needs to navigate. Coherent product, not history exposé.
 <users add with this app's actual flags>
 <users get-profile, users update-profile, users list, users revoke, tokens create>
 <where to obtain backend credentials if API-proxy, or what each preference field controls>
+<forward anchor-link to "Connect end users" — admin's next step once a user is added>
 
-## Verify and register MCP clients
+## Sanity-check the deployment
 
-<probe>
-<register command output with real-looking URLs>
+<probe — admin-only check that auth, MCP layer, and tool listing are healthy>
+
+## Connect end users
+
+<register command — the per-client setup commands the end user runs; run register and document what it actually prints, don't paraphrase>
 <manual MCP client config as fallback>
+
+## Smoke-test a tool (optional)
+
+<my-app-admin safe-tool --invoke if the app declares a SafeTool, or my-app-admin tools call <name> for ad-hoc invocation>
 
 ## Configuration
 
