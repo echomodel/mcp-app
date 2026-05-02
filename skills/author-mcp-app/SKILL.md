@@ -392,6 +392,14 @@ may depend on newer framework features.
 - [ ] mcp-app framework test suite — if `tests/framework/` exists,
   run `pytest tests/framework/ -v`. If it doesn't, set it up
   (see Step 5 in Testing and Validation)
+- [ ] Local install is editable before any CLI-driven validation
+  runs (see Step 0 in Testing and Validation). For Mode 3 reviews
+  in particular: the locally-installed `<name>-mcp` may have been
+  installed weeks ago as a snapshot — verify with
+  `pipx list | grep -A5 <package>` for the `(editable)` marker
+  before trusting any stdio smoke-test result.
+- [ ] Live stdio smoke test passes against the editable install
+  (Step 3 in Testing and Validation)
 
 ### Documentation
 - [ ] README.md with quick start, deployment, config
@@ -1035,6 +1043,53 @@ tokens only — existing tokens keep their original expiry.
 After building the solution, write tests and validate both transports.
 This is not optional — do it before the compliance dashboard.
 
+### Step 0: Verify the local install reflects the working tree
+
+Anything in this section that runs the locally-installed CLI
+(`<name>-mcp`, `<name>-admin`) is only valid if that install
+actually executes the code in the working tree. Two install
+shapes look identical from outside but behave very differently:
+
+- **Editable install** (`pipx install -e .` or `pip install -e .`)
+  — the entry point dispatches into the source tree. Edits to
+  source files are picked up on the next CLI invocation. This
+  is what every step below assumes.
+- **Snapshot install** (plain `pipx install .` or
+  `pip install .`) — the entry point runs whatever code was
+  installed at install time. Subsequent edits to the source tree
+  have no effect on the installed CLI until the next reinstall.
+
+Snapshot installs are the silent killer for Mode 3 reviews and
+for any returning operator picking up the repo days later: the
+stdio recipe below can pass cleanly against a stale snapshot
+while the working tree's actual changes remain unverified —
+a false "validation green."
+
+`<cli> --version` is **not** a sufficient check. The version
+string can match across both install kinds even when the
+installed code differs from the working tree, because version
+bumps are explicit and source edits do not change the version
+string by themselves.
+
+The reliable verification primitive for `pipx`-managed installs:
+
+```bash
+pipx list 2>&1 | grep -A5 <package-name>
+```
+
+The output for a correct install includes the literal
+`(editable)` marker on the package line. If the marker is
+absent, the install is a snapshot — fix it before continuing:
+
+```bash
+pipx install -e . --force
+```
+
+(Or `pip install -e .` if pip-managed in a venv.)
+
+For installers other than `pipx`, find the equivalent
+editable-marker check and apply the same precondition.
+
 ### Step 1: SDK unit tests
 
 Test business logic directly. Set `current_user` and env vars
@@ -1124,6 +1179,21 @@ async def test_register_and_call_tool(app_client):
 Unit and framework tests don't exercise the real MCP transport.
 Drive at least one tool through stdio end-to-end before declaring
 the app ready.
+
+**Precondition: install is editable.** This recipe runs the
+locally-installed `<name>-mcp` CLI. If the install is a
+snapshot rather than editable, the recipe will round-trip
+successfully against stale code and produce a misleading green
+result. Confirm before running:
+
+```bash
+pipx list 2>&1 | grep -A5 <package-name>
+```
+
+Look for the `(editable)` marker on the package line. If it's
+absent, run `pipx install -e . --force` (or `pip install -e .`)
+from the repo root. See "Step 0: Verify the local install
+reflects the working tree" above for the full rationale.
 
 **Use a throwaway project directory** so the test registration
 doesn't pollute your user-scope or working-project MCP configs:
@@ -1941,6 +2011,16 @@ breaking compliance:
   profile handling)
 - How to run the test suites — SDK unit tests and the
   mcp-app framework test suite (`pytest tests/framework/`)
+- Editable-vs-snapshot install distinction for the live
+  validation steps. Anything that runs `<name>-mcp` or
+  `<name>-admin` from the local install — stdio smoke
+  tests, release checklists, "does this work for me right
+  now" sanity checks — must verify the install is editable
+  before trusting its output. `<cli> --version` does NOT
+  detect this; use `pipx list | grep -A5 <package>` and
+  look for the `(editable)` marker. Remediate with
+  `pipx install -e . --force`. (Same logic the
+  `author-mcp-app` skill applies in its own Step 0.)
 - Environment variable conventions and how to add
   app-specific XDG paths
 - Where deployment configuration lives and what owns it
