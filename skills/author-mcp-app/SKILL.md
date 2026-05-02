@@ -338,7 +338,10 @@ may depend on newer framework features.
 - [ ] `App` object declared in `__init__.py` with name and tools_module
 - [ ] Tools module contains plain async functions (no decorators)
 - [ ] Identity middleware runs by default (no config needed)
-- [ ] Tool docstrings are clear and user-centric
+- [ ] Tool docstrings are clear and user-centric (also surface in
+      `tools show <name>` for operators)
+- [ ] Considered declaring a `SafeTool` for end-to-end smoke testing,
+      or made a deliberate decision to opt out
 
 ### MCP Server (FastMCP — if not using mcp-app)
 - [ ] Uses `mcp` package (FastMCP) with `stateless_http=True`
@@ -608,11 +611,110 @@ Identity middleware runs automatically in HTTP mode. Store
 defaults to filesystem. No configuration unless adding custom
 middleware.
 
+**Tool docstrings are operator-facing.** The docstring and type
+hints on each tool function drive what `tools show <name>`
+displays in the admin CLI — not just what an MCP-client agent
+sees. Authors writing tool docstrings are now writing operator
+help content too. Be specific and concise.
+
 **Run:**
 ```bash
 my-solution-mcp serve              # HTTP
 my-solution-mcp stdio --user local  # stdio
 ```
+
+### Declaring a safe tool for smoke testing
+
+Each app may optionally declare ONE safe, read-only, low-PII
+tool that the admin CLI can invoke for an end-to-end smoke
+test (`my-solution-admin safe-tool --invoke`). This becomes the
+canonical "deeper than probe" check — exercising the
+solution-specific tool wiring, the upstream credential, and the
+response shape, without relying on a human or agent to read
+user-authored content.
+
+```python
+from mcp_app import App, SafeTool
+from my_solution.mcp import tools
+
+app = App(
+    name="my-solution",
+    tools_module=tools,
+    safe_tool=SafeTool(
+        name="count_items",
+        arguments={},
+        description="returns the number of configured items in the user's account",
+    ),
+)
+```
+
+`safe_tool` is **optional**. The framework treats "no safe tool
+declared" as a fully supported state — `probe` is still
+available and the admin CLI's `safe-tool` command surfaces a
+structured "not declared" envelope.
+
+#### What makes a tool "safe"
+
+The defining property is **low information density about the
+user**. A response identical for every user of the same product
+is ideal. A response that varies per user only along impersonal
+axes (counts, configuration enums, public reference data) is
+acceptable. A response containing content the user themselves
+authored is not.
+
+In priority order:
+
+1. **Pure counts** — `{"count": 9}`. Safest by far. Strong fit
+   even for products whose normal responses are highly personal.
+2. **System enums / fixed taxonomies** — labels the platform
+   defines, not labels the user created (e.g., a fixed set of
+   built-in role names or system-defined statuses).
+3. **Identifier-only listings** — opaque IDs the user didn't
+   type (UUIDs, content hashes, internal numeric IDs), with no
+   names, labels, or other user-authored fields.
+4. **Mixed / partial** — a list where each item exposes only a
+   system-derived subset (creation timestamp range bucket,
+   record type, state). Acceptable only when the subset itself
+   isn't identifying.
+
+Anti-patterns:
+
+- Names, labels, subjects, descriptions the user wrote.
+- "Last N items" or "items from the last N days" — these reveal
+  recency patterns and often the most-recent items themselves.
+- Free-text fields the user could have typed arbitrary content into.
+- Tools whose response shape depends on the user's data in a
+  way that leaks configuration choices.
+
+If no existing tool fits cleanly, the right move is often to
+**add a small dedicated tool exclusively for this purpose**:
+
+- `count_<entity>() -> {"count": N}`
+- `health() -> {"status": "ok", "upstream_reachable": true}` if
+  the framework's `/health` doesn't already cover the upstream.
+- A flag on an existing tool that downgrades the response to
+  counts/IDs only.
+
+This is a legitimate and explicitly blessed pattern. A
+purpose-built safe tool is generally better than reusing a tool
+that returns more than the smoke test needs.
+
+#### The `description` field
+
+Short, app-provided, plain English. This is the field the admin
+CLI surfaces in the envelope and the human-readable output. It
+is intentionally separate from the MCP-side tool description —
+which is written for an agent consuming the tool list and may
+be more revealing than is appropriate for an admin smoke-test
+artifact. Write the safe-tool description for an operator
+deciding whether to invoke it.
+
+#### Opting out
+
+If no candidate is appropriately safe and adding one isn't
+worth it for the solution's risk profile, leave `safe_tool`
+unset and rely on `probe`. The framework treats this as a
+normal, supported configuration. The choice is the author's.
 
 ### With FastMCP (alternative)
 
@@ -1261,19 +1363,51 @@ my-solution-admin probe
 # Register a user
 my-solution-admin users add alice@example.com
 
+# Sanity-check tool exposure and schemas
+my-solution-admin tools list
+my-solution-admin tools show <name>
+
+# End-to-end smoke test (when a safe tool is declared)
+my-solution-admin safe-tool --invoke
+
+# Debug a specific tool with custom arguments
+my-solution-admin tools call <name> --arg k=v
+
 # Generate MCP client registration commands (mints a token)
 my-solution-admin register --user alice@example.com
 ```
 
+The post-deploy verification ladder is six rungs: `connect` →
+`probe` (framework layer) → `tools list` (right tools exposed?)
+→ `tools show <name>` (schema sanity check) → `safe-tool
+--invoke` (full end-to-end, if declared) → `tools call <name>`
+(targeted debug). Most deploys only need the first three.
+
 `probe` confirms the deployment is serving tools end-to-end — not
 just that the process is alive (`health`), but that the MCP layer
-responds with the expected tools. Use it as the single verification
-step after any deploy or redeploy.
+responds with the expected tools.
 
-`register` emits ready-to-paste commands for Claude Code, Gemini
-CLI, and the Claude.ai URL form, with the URL and token already
-substituted. Both commands support `--json` for structured output
-when called from an agent.
+`register --user <email>` mints a token for the named user and
+prints the per-client setup commands the end user runs to add
+the deployment to their MCP client.
+
+When documenting `register` in the implementing app's README, do
+not paraphrase or invent what it prints. Run the command and
+reproduce what it actually outputs. The exact shapes are allowed
+to change between mcp-app releases and across MCP clients, and
+hand-transcribed samples drift from reality silently.
+
+Don't assume a per-client setup shape from the client category.
+MCP clients support varying authentication models — bearer
+headers, tokens in URLs, OAuth2, and likely more over time — and
+the same client may add new options. Whatever shape `register`
+prints for the running app + client + auth combination is the
+source of truth. Documenting it correctly means showing the
+reader what `register` actually produced for this app, not what
+an analogous combination produced elsewhere.
+
+Both `probe` and `register` support `--json` for structured
+output when called from an agent.
 
 ## Gitignore
 

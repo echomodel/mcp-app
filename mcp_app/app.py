@@ -34,6 +34,44 @@ STORE_ALIASES = {"filesystem": FileSystemUserDataStore}
 MIDDLEWARE_ALIASES = {"user-identity": JWTMiddleware}
 
 
+@dataclass
+class SafeTool:
+    """Declaration of a tool the admin CLI can invoke for end-to-end smoke testing.
+
+    The defining property of a safe tool is *low information density* about
+    the user. A response that is identical for every user of the same product
+    is ideal. A response that varies per user only along impersonal axes
+    (counts, configuration enums, public reference data) is acceptable. A
+    response containing content the user themselves authored is not.
+
+    Patterns in priority order:
+      1. Pure counts — ``{"count": 9}``. Safest by far.
+      2. System enums / fixed taxonomies — labels the platform defines.
+      3. Identifier-only listings — opaque IDs the user did not type.
+      4. Mixed / partial — system-derived subset of an item, never user text.
+
+    Anti-patterns: names, labels, subjects, descriptions the user wrote;
+    "last N" framings; free-text fields; shape-leaks user configuration.
+
+    If no existing tool fits, add a small dedicated tool exclusively for
+    this purpose (``count_<entity>()``, ``health()``). That is an
+    explicitly blessed pattern. Opting out (leaving ``safe_tool`` unset)
+    is also fully fine — relying on ``probe`` is a supported configuration.
+
+    Args:
+        name: The tool name (must match a registered tool).
+        arguments: Arguments dict to pass to ``tools/call``. Usually ``{}``.
+        description: Short, app-provided, plain English description shown
+            by the admin CLI. Intentionally separate from the MCP-side
+            tool description (which is written for agents and may be more
+            revealing than is appropriate for an admin smoke-test artifact).
+    """
+
+    name: str
+    arguments: dict
+    description: str
+
+
 def _resolve_class(value: str, aliases: dict):
     if "." not in value:
         if value not in aliases:
@@ -96,6 +134,7 @@ class App:
     middleware: list[str] | None = None
     profile_model: type | None = None
     profile_expand: bool = True
+    safe_tool: SafeTool | None = None
 
     def __post_init__(self):
         self._asgi = None
@@ -139,7 +178,7 @@ class App:
 
         auth_store = DataStoreAuthAdapter(store)
         verifier = JWTVerifier(auth_store)
-        admin_app = create_admin_app(auth_store)
+        admin_app = create_admin_app(auth_store, safe_tool=self.safe_tool)
         inner = self._mcp.streamable_http_app()
 
         if self.middleware is None:

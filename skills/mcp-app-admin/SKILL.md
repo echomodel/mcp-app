@@ -32,8 +32,11 @@ journeys 4–6:
   revoke, issue tokens, read profiles (`users get-profile`),
   rotate profile fields (`users update-profile`).
 - **Journey 6: Verify end-to-end and register MCP clients** —
-  `probe` for liveness + MCP round-trip, `register` to emit
-  Claude Code, Gemini CLI, and Claude.ai URL-form commands.
+  `probe` for the framework layer, `tools list/show/call` for
+  discovery and ad-hoc invocation, `safe-tool --invoke` for the
+  opinionated end-to-end smoke test (when declared), and
+  `register` to emit Claude Code, Gemini CLI, and Claude.ai
+  URL-form commands.
 
 Journeys 1–3 (install, run locally, deploy) are outside this
 skill's scope — refer the user or agent to the app's own
@@ -238,7 +241,23 @@ generic CLI doesn't know which app's store to locate.
 
 ## Step 3: Verify the Deployment
 
-Use `probe` for single-command end-to-end verification:
+The verification ladder has six rungs. Stop at the first one
+that reveals the issue; otherwise climb until the deployment is
+fully validated.
+
+1. **`connect`** — point the admin CLI at the deployment.
+2. **`probe`** — framework layer (liveness, admin auth,
+   `tools/list` round-trip).
+3. **`tools list`** — confirm the solution's tools module
+   loaded and tool names match expectations.
+4. **`tools show <name>`** — when the schema for a specific
+   tool needs a sanity check.
+5. **`safe-tool --invoke`** — opinionated end-to-end smoke
+   test (only if the solution declared one).
+6. **`tools call <name>`** — debug a specific tool with custom
+   arguments when steps 2–5 leave a gap.
+
+### 3a: probe
 
 ```bash
 my-solution-admin probe
@@ -257,9 +276,9 @@ Tools (3):
 
 This hits `/health` for liveness, then does an MCP `tools/list`
 round-trip using a short-lived token minted for an existing
-user. If it reports tools, the app is fully operational —
-health, admin auth, user auth, MCP layer, and tool wiring all
-work.
+user. If it reports tools, the framework layer is operational —
+health, admin auth, user auth, MCP transport, and tool wiring
+all work.
 
 If no users are registered yet, probe reports liveness only
 and tells you it can't do the MCP round-trip. Register a user
@@ -270,7 +289,84 @@ For structured output (agent consumption):
 my-solution-admin probe --json
 ```
 
-### Manual verification (if probe isn't enough)
+### 3b: tools list / show
+
+`probe` confirms the framework layer. `tools list` is a quick
+sanity check that the right tools are exposed:
+
+```bash
+my-solution-admin tools list
+my-solution-admin tools show <name>
+my-solution-admin tools list --json     # for agent consumption
+```
+
+`tools show <name>` renders the description, arguments with
+type/required-ness, and a copy-pasteable `tools call`
+invocation example. Useful when you don't remember a tool's
+schema or want to debug a specific tool's contract before
+calling it.
+
+### 3c: safe-tool --invoke (deeper than probe)
+
+Probe stops at `tools/list`. It does **not** exercise the
+solution's tool handlers, the upstream credential on the user's
+profile, or the response-shape contract a real client depends
+on. `safe-tool --invoke` does — when the solution declared a
+safe tool:
+
+```bash
+my-solution-admin safe-tool                # show declaration only
+my-solution-admin safe-tool --invoke       # full end-to-end round-trip
+my-solution-admin safe-tool --invoke --json
+```
+
+The CLI prints the JSON-RPC request body **before** sending so
+an operator can copy and replay it manually in a debugger or
+another terminal, with a different bearer token, etc. After the
+call it prints the HTTP status code and the full response body.
+
+#### Failure-mode table
+
+| `probe` | `safe-tool --invoke` | Likely problem |
+|---|---|---|
+| ❌ | n/a | Framework layer — see the probe troubleshooting table above. |
+| ✅ | `supported: false` | Solution didn't declare a safe tool. Either accept this and rely on probe, or declare one. |
+| ✅ | non-200 status | Solution-specific tool failed. Inspect `result.body` for the JSON-RPC error. |
+| ✅ | 200 but empty / missing | Tool wired but upstream credential is invalid/expired/revoked. Use `users update-profile` to rotate the credential field. |
+| ✅ | 200 with expected shape | Full stack verified. Done. |
+
+Note: `--json` is the canonical agent-consumption path. The
+envelope is versioned (`schema_version: "1"`) and additive-only
+— consumers must tolerate unknown fields.
+
+#### Privacy note for agent operators
+
+`safe-tool --invoke` returns a curated, low-PII response that
+is safe for an agent to read. **`tools call` is not curated**
+and may return user content. When agent-driven validation must
+not see user-authored data, prefer `safe-tool --invoke` and
+rely on the response envelope contract.
+
+### 3d: tools call (open invocation)
+
+When `safe-tool --invoke` isn't declared, or you need to invoke
+a different tool with custom arguments to isolate an issue:
+
+```bash
+my-solution-admin tools call <name> --arg k=v --arg k2=v2
+my-solution-admin tools call <name> --body '{"k": "v"}'
+my-solution-admin tools call <name> --body @args.json
+my-solution-admin tools call <name> --user alice@example.com   # mint as alice
+```
+
+`--arg` is for scalars (booleans, numbers, strings, null) and
+type-coerces from the tool schema. Use `--body` for objects
+and arrays.
+
+`tools call` may return PII or user-authored content. Operators
+running it interactively are implicitly accepting that.
+
+### Manual verification (if the CLI isn't enough)
 
 ```bash
 # Liveness

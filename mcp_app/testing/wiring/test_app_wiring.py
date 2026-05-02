@@ -31,6 +31,23 @@ def test_admin_cli_has_connect_users_health(app):
     assert "health" in commands, "admin_cli missing 'health' command"
 
 
+def test_admin_cli_has_safe_tool_command(app):
+    """Per #34, every mcp-app admin CLI exposes `safe-tool` (opt-in declaration)."""
+    assert "safe-tool" in app.admin_cli.commands, (
+        "admin_cli missing 'safe-tool' command"
+    )
+
+
+def test_admin_cli_has_tools_group(app):
+    """Per #35, every mcp-app admin CLI exposes the `tools` subcommand group."""
+    assert "tools" in app.admin_cli.commands, "admin_cli missing 'tools' group"
+    tools_group = app.admin_cli.commands["tools"]
+    sub = set(tools_group.commands.keys())
+    assert {"list", "show", "call"}.issubset(sub), (
+        f"tools group missing required subcommands; got {sub}"
+    )
+
+
 def test_tools_module_has_public_async_functions(app):
     tools = public_tools(app.tools_module)
     assert len(tools) > 0, (

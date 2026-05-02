@@ -41,13 +41,22 @@ def get_default_token_duration() -> int:
         )
 
 
-def create_admin_app(store: UserAuthStore) -> Starlette:
+SAFE_TOOL_SCHEMA_VERSION = "1"
+
+
+def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
     """Create a Starlette app with admin REST endpoints.
 
     Args:
         store: Auth store for user registration, verification, and
             profile storage. POST /admin/users accepts an optional
             'profile' field saved alongside the auth record.
+        safe_tool: Optional ``SafeTool`` declaration. When set, exposed
+            via ``GET /admin/safe-tool`` so the admin CLI can perform
+            an end-to-end smoke test using the declared tool. The
+            endpoint carries only metadata — the CLI does the actual
+            MCP handshake itself, avoiding duplication of MCP transport
+            logic on the server.
     """
 
     signing_key = os.environ.get("SIGNING_KEY")
@@ -179,6 +188,35 @@ def create_admin_app(store: UserAuthStore) -> Starlette:
         duration = body.get("duration_seconds", get_default_token_duration())
         return JSONResponse(_issue_token(email, duration))
 
+    async def get_safe_tool(request: Request) -> JSONResponse:
+        """Return the solution's safe-tool declaration, or an unsupported envelope.
+
+        Schema is versioned and additive-only: ``schema_version`` is
+        always present so future readers can detect format changes.
+        Consumers must tolerate unknown fields.
+        """
+        if not _verify_admin(request):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        if safe_tool is None:
+            return JSONResponse({
+                "schema_version": SAFE_TOOL_SCHEMA_VERSION,
+                "supported": False,
+                "hint": (
+                    "This deployment did not declare a safe tool. "
+                    "Run probe to verify the MCP layer and inspect "
+                    "available tools."
+                ),
+            })
+        return JSONResponse({
+            "schema_version": SAFE_TOOL_SCHEMA_VERSION,
+            "supported": True,
+            "tool": {
+                "name": safe_tool.name,
+                "description": safe_tool.description,
+                "arguments": safe_tool.arguments,
+            },
+        })
+
     return Starlette(routes=[
         Route("/users", register_user, methods=["POST"]),
         Route("/users", list_users, methods=["GET"]),
@@ -186,4 +224,5 @@ def create_admin_app(store: UserAuthStore) -> Starlette:
         Route("/users/{email:path}/profile", get_profile, methods=["GET"]),
         Route("/users/{email:path}", revoke_user, methods=["DELETE"]),
         Route("/tokens", create_token, methods=["POST"]),
+        Route("/safe-tool", get_safe_tool, methods=["GET"]),
     ])

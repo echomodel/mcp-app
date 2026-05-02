@@ -84,6 +84,156 @@ def _connect_handler(target: str, signing_key: str | None, app_name: str | None)
         click.echo(f"Configured {label}: {target}")
 
 
+def _print_request(invocation: dict):
+    """Print a JSON-RPC invocation in HTTP-trace style with `>` prefixes.
+
+    Emitting the request body before sending serves an operator-replay
+    purpose — copy it into a debugger or another terminal without
+    re-deriving the wire format.
+    """
+    headers = invocation.get("headers", {})
+    click.echo(f"> {invocation.get('method', 'POST')} {invocation.get('url', '')}")
+    for k, v in headers.items():
+        click.echo(f"> {k}: {v}")
+    body = invocation.get("body")
+    if body is not None:
+        for line in json.dumps(body, indent=2).splitlines():
+            click.echo(f"> {line}")
+
+
+def _print_response(status: int, body: dict):
+    click.echo(f"< {status}")
+    for line in json.dumps(body, indent=2).splitlines():
+        click.echo(f"< {line}")
+
+
+def _coerce_arg_value(raw: str, schema: dict | None):
+    """Coerce a `--arg k=v` raw string to the type indicated by the tool schema.
+
+    Booleans, numbers, and ``null`` are converted when the schema says so.
+    Anything unrecognized is passed through as a string. Complex shapes
+    (objects, arrays) should use ``--json``; passing them via ``--arg``
+    raises a clear error pointing at ``tools show``.
+    """
+    if not schema:
+        return raw
+    type_ = schema.get("type")
+    if type_ == "boolean":
+        if raw.lower() in {"true", "1", "yes"}:
+            return True
+        if raw.lower() in {"false", "0", "no"}:
+            return False
+        raise click.ClickException(
+            f"Expected boolean, got {raw!r}. Use 'true' or 'false'."
+        )
+    if type_ == "integer":
+        try:
+            return int(raw)
+        except ValueError:
+            raise click.ClickException(f"Expected integer, got {raw!r}.")
+    if type_ == "number":
+        try:
+            return float(raw)
+        except ValueError:
+            raise click.ClickException(f"Expected number, got {raw!r}.")
+    if type_ == "null":
+        return None
+    if type_ in {"object", "array"}:
+        raise click.ClickException(
+            f"Argument expects {type_}; --arg only takes scalars. "
+            f"Use --body to pass a full arguments object."
+        )
+    return raw
+
+
+def _parse_args_pairs(arg_pairs: tuple[str, ...], input_schema: dict | None) -> dict:
+    """Turn ``--arg k=v --arg k2=v2`` into a dict, coerced via the schema."""
+    if not arg_pairs:
+        return {}
+    properties = (input_schema or {}).get("properties", {})
+    result = {}
+    for pair in arg_pairs:
+        if "=" not in pair:
+            raise click.ClickException(
+                f"--arg must be 'key=value', got: {pair!r}"
+            )
+        key, _, value = pair.partition("=")
+        result[key] = _coerce_arg_value(value, properties.get(key))
+    return result
+
+
+def _parse_json_arg(raw: str) -> dict:
+    """Parse a literal JSON object or ``@path`` reference."""
+    if raw.startswith("@"):
+        path = Path(raw[1:])
+        if not path.exists():
+            raise click.ClickException(f"JSON file not found: {path}")
+        return json.loads(path.read_text())
+    return json.loads(raw)
+
+
+def _print_safe_tool_envelope(envelope: dict):
+    """Render the safe-tool envelope as human-readable text."""
+    click.echo(f"schema_version: {envelope.get('schema_version', '?')}")
+    if not envelope.get("supported"):
+        click.echo("Safe tool: not declared")
+        hint = envelope.get("hint")
+        if hint:
+            click.echo(f"  {hint}")
+        return
+    tool = envelope.get("tool", {})
+    click.echo(f"Safe tool: {tool.get('name', '?')}")
+    desc = tool.get("description")
+    if desc:
+        click.echo(f"  {desc}")
+    args = tool.get("arguments", {})
+    click.echo(f"  arguments: {json.dumps(args)}")
+    invocation = envelope.get("invocation")
+    if invocation:
+        click.echo("")
+        click.echo("Invocation:")
+        _print_request(invocation)
+    result = envelope.get("result")
+    if result is not None:
+        click.echo("")
+        click.echo("Response:")
+        _print_response(result.get("status_code", 0), result.get("body", {}))
+
+
+def _render_tool_show(tool: dict, app_name_hint: str) -> None:
+    """Render `tools show <name>` output: description, parameters, example."""
+    name = tool["name"]
+    description = tool.get("description") or ""
+    schema = tool.get("inputSchema") or {}
+    properties = schema.get("properties", {})
+    required = set(schema.get("required", []))
+
+    click.echo(name)
+    if description:
+        for line in description.splitlines():
+            click.echo(f"  {line}")
+    click.echo("")
+    if not properties:
+        click.echo("  Arguments: (none)")
+    else:
+        click.echo("  Arguments:")
+        for pname, pinfo in properties.items():
+            ptype = pinfo.get("type", "any")
+            req = "required" if pname in required else "optional"
+            pdesc = pinfo.get("description", "")
+            line = f"    {pname}  ({ptype}, {req})"
+            if pdesc:
+                line += f"  {pdesc}"
+            click.echo(line)
+    click.echo("")
+    click.echo("  Example invocation:")
+    parts = [f"{app_name_hint} tools call {name}"]
+    for pname in properties:
+        prefix = "" if pname in required else "[optional] "
+        parts.append(f"{prefix}--arg {pname}=<value>")
+    click.echo("    " + " \\\n      ".join(parts))
+
+
 def _print_probe(result: dict):
     """Render probe result as human-readable text."""
     click.echo(f"URL: {result['url']}")
@@ -349,6 +499,190 @@ def _get_auth_store(app_name: str):
             _resolve_url(None, app_name),
             _resolve_signing_key(None, app_name),
         )
+
+
+def _require_remote_adapter(app_name: str | None):
+    """Return a RemoteAuthAdapter for the configured connection.
+
+    Raises ClickException with actionable hints when the connection is
+    local-only or not configured.
+    """
+    from mcp_app.admin_client import RemoteAuthAdapter
+    cfg = _load_setup(app_name)
+    if cfg.get("mode") == "local":
+        raise click.ClickException(
+            "This command requires a remote connection. "
+            "Run 'connect <url> --signing-key <key>'."
+        )
+    return RemoteAuthAdapter(
+        _resolve_url(None, app_name),
+        _resolve_signing_key(None, app_name),
+    )
+
+
+def _safe_tool_command(invoke, as_json, user, app_name: str | None):
+    """Shared body for the `safe-tool` command on both CLIs.
+
+    The endpoint carries metadata only — when ``--invoke`` is passed
+    the CLI does the MCP handshake itself (avoids duplicating MCP
+    transport logic on the server). The JSON-RPC request body is
+    printed before sending so an operator can copy and replay it
+    manually in a debugger or another terminal, against a different
+    bearer token, etc.
+    """
+    adapter = _require_remote_adapter(app_name)
+    envelope = _run(adapter.get_safe_tool())
+
+    if invoke:
+        if not envelope.get("supported"):
+            if as_json:
+                click.echo(json.dumps(envelope, indent=2))
+            else:
+                _print_safe_tool_envelope(envelope)
+            raise click.ClickException(
+                "Cannot invoke — no safe tool declared by this deployment."
+            )
+        tool = envelope["tool"]
+        result = _run(adapter.call_tool(tool["name"], tool.get("arguments") or {}, user_email=user))
+        envelope["invocation"] = result["invocation"]
+        envelope["result"] = result["result"]
+        envelope["probed_as"] = result["probed_as"]
+
+    if as_json:
+        click.echo(json.dumps(envelope, indent=2))
+    else:
+        _print_safe_tool_envelope(envelope)
+
+
+def _tools_list_command(as_json, user, app_name: str | None):
+    """Shared body for `tools list`."""
+    adapter = _require_remote_adapter(app_name)
+    tools, probed_as = _run(adapter.list_tools(user_email=user))
+    if as_json:
+        click.echo(json.dumps({"tools": tools, "probed_as": probed_as}, indent=2))
+        return
+    if not tools:
+        click.echo("(no tools)")
+        return
+    name_w = max(len(t["name"]) for t in tools)
+    for t in tools:
+        desc = (t.get("description") or "").splitlines()[0] if t.get("description") else ""
+        click.echo(f"  {t['name']:<{name_w}}  {desc}")
+    cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
+    click.echo("")
+    click.echo(f"({len(tools)} tools — run `{cmd_hint} tools show <name>` for schema)")
+
+
+def _tools_show_command(name, as_json, user, app_name: str | None):
+    """Shared body for `tools show <name>`."""
+    adapter = _require_remote_adapter(app_name)
+    tools, _ = _run(adapter.list_tools(user_email=user))
+    matches = [t for t in tools if t["name"] == name]
+    if not matches:
+        cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
+        raise click.ClickException(
+            f"Unknown tool: {name}. Run `{cmd_hint} tools list` to see all tools."
+        )
+    tool = matches[0]
+    if as_json:
+        click.echo(json.dumps(tool, indent=2))
+        return
+    cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
+    _render_tool_show(tool, cmd_hint)
+
+
+def _tools_call_command(name, arg_pairs, json_body, as_json, user, app_name: str | None):
+    """Shared body for `tools call <name>`."""
+    adapter = _require_remote_adapter(app_name)
+
+    if json_body:
+        arguments = _parse_json_arg(json_body)
+        if not isinstance(arguments, dict):
+            raise click.ClickException(
+                "--json must be a JSON object (not array/scalar)."
+            )
+    else:
+        tools, _ = _run(adapter.list_tools(user_email=user))
+        matches = [t for t in tools if t["name"] == name]
+        if not matches:
+            cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
+            raise click.ClickException(
+                f"Unknown tool: {name}. Run `{cmd_hint} tools list` to see all tools."
+            )
+        arguments = _parse_args_pairs(arg_pairs, matches[0].get("inputSchema"))
+
+    result = _run(adapter.call_tool(name, arguments, user_email=user))
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    _print_request(result["invocation"])
+    click.echo("")
+    _print_response(result["result"]["status_code"], result["result"]["body"])
+
+
+# Note: the `tools` subcommand group is intentionally scoped to mcp-app
+# deployments. Targeting non-mcp-app servers is explicitly out of scope —
+# a generic MCP client is a separate product. Reusing the admin CLI here
+# saves the operator from re-doing connect/auth/handshake setup that
+# `connect` already established.
+def _add_safe_tool_command(cli: click.Group, app_name: str | None):
+    @cli.command("safe-tool")
+    @click.option("--invoke", is_flag=True,
+                  help="Invoke the declared safe tool end-to-end.")
+    @click.option("--user", default=None,
+                  help="Mint a token for this user. Otherwise uses first registered user.")
+    @click.option("--json", "as_json", is_flag=True,
+                  help="Structured JSON envelope output for agents.")
+    def safe_tool(invoke, user, as_json):
+        """Show or invoke this deployment's declared safe tool.
+
+        Without --invoke: shows the declaration only (cheap, no
+        upstream call). With --invoke: performs the full MCP
+        handshake using a freshly minted user token. Either way,
+        --json emits the canonical agent-consumption envelope.
+        """
+        _safe_tool_command(invoke, as_json, user, app_name)
+
+
+def _add_tools_group(cli: click.Group, app_name: str | None):
+    @cli.group()
+    def tools():
+        """Discover and invoke MCP tools on the deployment."""
+        pass
+
+    @tools.command("list")
+    @click.option("--user", default=None,
+                  help="Mint a token for this user. Otherwise uses first registered user.")
+    @click.option("--json", "as_json", is_flag=True, help="JSON output.")
+    def tools_list(user, as_json):
+        """Enumerate the tools the deployment exposes."""
+        _tools_list_command(as_json, user, app_name)
+
+    @tools.command("show")
+    @click.argument("name")
+    @click.option("--user", default=None,
+                  help="Mint a token for this user. Otherwise uses first registered user.")
+    @click.option("--json", "as_json", is_flag=True, help="JSON output of the raw tool schema.")
+    def tools_show(name, user, as_json):
+        """Show schema and example invocation for a named tool."""
+        _tools_show_command(name, as_json, user, app_name)
+
+    # `--json` here is the output-format flag (consistent with the rest
+    # of the admin CLI); the JSON body literal goes through `--body` to
+    # avoid the value-vs-flag ambiguity that one shared `--json` would
+    # introduce. `--body` accepts either a JSON object or `@path`.
+    @tools.command("call")
+    @click.argument("name")
+    @click.option("--arg", "arg_pairs", multiple=True,
+                  help="Argument as key=value. Repeatable. Scalars only — use --body for objects.")
+    @click.option("--body", "json_body", default=None,
+                  help="Full arguments JSON object, or @path to a file.")
+    @click.option("--user", default=None,
+                  help="Mint a token for this user. Otherwise uses first registered user.")
+    @click.option("--json", "as_json", is_flag=True, help="JSON envelope output.")
+    def tools_call(name, arg_pairs, json_body, user, as_json):
+        """Invoke a tool with the given arguments and print the response."""
+        _tools_call_command(name, arg_pairs, json_body, as_json, user, app_name)
 
 
 def create_mcp_cli(app) -> click.Group:
@@ -676,7 +1010,17 @@ def create_admin_cli(app_name: str) -> click.Group:
         result = _run(adapter.create_token(email))
         click.echo(f"Token for {result['email']}: {result['token']}")
 
+    _add_safe_tool_command(cli, app_name=app_name)
+    _add_tools_group(cli, app_name=app_name)
+
     return cli
+
+
+# Mount the same safe-tool / tools commands on the generic `mcp-app` CLI.
+# Done after definition of both the group and the helpers so name resolution
+# works at module-import time.
+_add_safe_tool_command(main, app_name=None)
+_add_tools_group(main, app_name=None)
 
 
 if __name__ == "__main__":

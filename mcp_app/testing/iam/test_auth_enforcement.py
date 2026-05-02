@@ -139,3 +139,29 @@ async def test_admin_register_with_profile(asgi_client):
     )
     assert resp.status_code == 200
     assert resp.json()["email"] == "profiled@example.com"
+
+
+@pytest.mark.asyncio
+async def test_admin_safe_tool_envelope_versioned(asgi_client, app):
+    """Per #34: GET /admin/safe-tool always returns a versioned envelope.
+
+    The schema is additive-only and consumers must tolerate unknown fields,
+    but ``schema_version`` and ``supported`` are always present.
+    """
+    headers = {"Authorization": f"Bearer {_admin_token()}"}
+    resp = await asgi_client.get("/admin/safe-tool", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "schema_version" in body
+    assert "supported" in body
+    if body["supported"]:
+        assert "tool" in body
+        assert body["tool"]["name"]
+    else:
+        assert "hint" in body
+
+
+@pytest.mark.asyncio
+async def test_admin_safe_tool_requires_admin(asgi_client):
+    resp = await asgi_client.get("/admin/safe-tool")
+    assert resp.status_code == 403

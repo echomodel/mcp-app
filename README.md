@@ -329,8 +329,61 @@ REST admin endpoints are mounted at `/admin` in HTTP mode:
 - `PATCH /admin/users/{email}/profile` — merge fields into a user's profile
 - `DELETE /admin/users/{email}` — revoke user
 - `POST /admin/tokens` — issue new token for existing user
+- `GET /admin/safe-tool` — return the deployment's safe-tool declaration
+  (or a structured "not declared" envelope)
 
 Gated by admin-scoped JWT (`scope: "admin"`, same signing key).
+
+### Safe tool
+
+Each app may optionally declare ONE safe, read-only, low-PII tool the
+admin CLI can invoke for an end-to-end smoke test. This becomes the
+canonical "deeper than probe" check, both for human operators and
+agent-driven validation that should not see user content.
+
+```python
+from mcp_app import App, SafeTool
+
+app = App(
+    name="my-app",
+    tools_module=tools,
+    safe_tool=SafeTool(
+        name="count_items",
+        arguments={},
+        description="returns the number of configured items",
+    ),
+)
+```
+
+`safe_tool` is optional. The defining property is *low information
+density about the user* — counts, system enums, opaque IDs, never
+content the user authored. The framework treats "no safe tool
+declared" as a fully supported state. See `mcp_app.SafeTool` for the
+full guidance.
+
+The CLI command `<my-app>-admin safe-tool [--invoke] [--json]` shows
+or runs the declaration. The `/admin/safe-tool` endpoint carries
+metadata only — the CLI does the MCP handshake itself, avoiding
+duplication of MCP transport logic on the server. The structured
+envelope is versioned (`schema_version: "1"`) and additive-only;
+consumers must tolerate unknown fields.
+
+### Tools subcommand group
+
+Every admin CLI inherits a `tools` subcommand group for ad-hoc
+discovery and invocation against the connected deployment:
+
+```bash
+my-app-admin tools list                        # enumerate
+my-app-admin tools show <name>                 # schema + example
+my-app-admin tools call <name> --arg k=v       # invoke with scalars
+my-app-admin tools call <name> --body '<json>' # invoke with full args
+```
+
+The tools shown are exactly the tools the solution registered via its
+tools module — no separate declaration needed. `safe-tool` curates,
+`tools` enumerates; both serve different operators in different
+moments.
 
 ## Local Testing
 
@@ -557,7 +610,47 @@ round-trip using a short-lived token minted for an existing user.
 If it reports all tools, the app is fully operational — health,
 admin auth, user auth, MCP layer, and tool wiring all work.
 
-**4. Generate MCP client registration commands:**
+**4. Inspect what tools the deployment exposes:**
+```bash
+my-app-admin tools list
+my-app-admin tools show <name>
+```
+
+`tools list` enumerates the tools the solution registered. `tools
+show <name>` renders the schema and a copy-pasteable invocation
+example. Useful as a sanity check that the tools module loaded and
+the names match expectations.
+
+**5. End-to-end smoke test (if the app declared a safe tool):**
+```bash
+my-app-admin safe-tool --invoke
+```
+
+Confirms the full stack — framework + solution-specific tool wiring
++ upstream credential + response shape. The JSON-RPC request body
+is printed before the call so you can copy and replay it from a
+debugger or another terminal.
+
+| `probe` | `safe-tool --invoke` | Likely problem |
+|---|---|---|
+| ❌ | n/a | Framework layer (network, signing key, MCP transport) |
+| ✅ | `supported: false` | No safe tool declared. Rely on probe, or declare one. |
+| ✅ | non-200 status | Solution-specific tool failed. Inspect `result.body`. |
+| ✅ | 200 but empty/missing | Tool wired but upstream credential invalid/expired. |
+| ✅ | 200 with expected shape | Full stack verified. Done. |
+
+**6. Debug a specific tool with custom arguments:**
+```bash
+my-app-admin tools call <name> --arg k=v
+my-app-admin tools call <name> --body '{"k": "v"}'
+```
+
+Use when `safe-tool --invoke` failed and you want to isolate the
+issue, or when no safe tool is declared and you want a real
+round-trip. The output includes the wire-level request body so
+you can replay it manually.
+
+**7. Generate MCP client registration commands:**
 ```bash
 my-app-admin register --user alice@example.com
 ```

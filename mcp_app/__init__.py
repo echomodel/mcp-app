@@ -1,8 +1,8 @@
 """mcp-app: Config-driven MCP application framework."""
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
-from mcp_app.app import App
+from mcp_app.app import App, SafeTool
 from mcp_app.context import current_user, register_profile
 from mcp_app.data_store import UserDataStore, FileSystemUserDataStore
 from mcp_app.models import UserAuthRecord, UserRecord
@@ -22,6 +22,7 @@ def get_store() -> UserDataStore:
 
 __all__ = [
     "App",
+    "SafeTool",
     "current_user",
     "register_profile",
     "get_store",

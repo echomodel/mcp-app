@@ -173,32 +173,137 @@ class RemoteAuthAdapter:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_safe_tool(self) -> dict:
+        """Fetch the deployment's safe-tool declaration envelope.
 
-async def _mcp_list_tools(
-    url: str, token: str, http_client: httpx.AsyncClient | None = None,
-) -> list[str]:
-    """MCP tools/list round-trip over streamable HTTP.
+        Returns the structured envelope from ``GET /admin/safe-tool``,
+        which always includes ``schema_version`` and ``supported``,
+        plus a ``tool`` block when a safe tool is declared, or a
+        ``hint`` field otherwise.
+        """
+        resp = await self._http.get(
+            f"{self.base_url}/admin/safe-tool",
+            headers=self._headers(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
-    The server runs with stateless_http=True and json_response=True so a
-    single POST with Accept: application/json is sufficient — no SSE session
-    needed.
+    async def _pick_probe_user(self, user_email: str | None) -> str | None:
+        """Resolve which user identity to mint a token for."""
+        if user_email is not None:
+            return user_email
+        users = await self.list()
+        active = [u for u in users if u.revoke_after is None]
+        return active[0].email if active else None
+
+    async def list_tools(self, user_email: str | None = None) -> tuple[list[dict], str]:
+        """Run JSON-RPC tools/list. Returns (tools, probed_as)."""
+        probed_as = await self._pick_probe_user(user_email)
+        if probed_as is None:
+            raise RuntimeError("No registered users — cannot mint a probe token.")
+        token = self._user_token(probed_as)
+        url = self.base_url + "/"
+        tools = await _mcp_list_tools_full(url, token, self._http)
+        return tools, probed_as
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict,
+        user_email: str | None = None,
+    ) -> dict:
+        """Invoke a tool via JSON-RPC tools/call.
+
+        Returns an envelope with the assembled invocation (URL, headers,
+        body) and the response (status_code, body) so callers can both
+        replay the request and inspect the result.
+        """
+        probed_as = await self._pick_probe_user(user_email)
+        if probed_as is None:
+            raise RuntimeError("No registered users — cannot mint a token.")
+        token = self._user_token(probed_as)
+        url = self.base_url + "/"
+        params = {"name": name, "arguments": arguments}
+        body = _mcp_body("tools/call", params, request_id=2)
+        status, response_body = await mcp_request(
+            url, token, "tools/call", params, self._http, request_id=2,
+        )
+        return {
+            "probed_as": probed_as,
+            "invocation": {
+                "method": "POST",
+                "url": url,
+                "headers": _mcp_headers(token),
+                "body": body,
+            },
+            "result": {
+                "status_code": status,
+                "body": response_body,
+            },
+        }
+
+
+# Canonical JSON-RPC client for mcp-app's own admin CLI. Shared by
+# probe (tools/list), safe-tool --invoke (tools/call), and the
+# tools subcommand group (list/show/call). A future contributor adding a
+# third consumer should reuse this helper, not re-implement.
+def _mcp_headers(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+
+
+def _mcp_body(method: str, params: dict | None, request_id: int) -> dict:
+    body = {"jsonrpc": "2.0", "method": method, "id": request_id}
+    if params is not None:
+        body["params"] = params
+    return body
+
+
+async def mcp_request(
+    url: str,
+    token: str,
+    method: str,
+    params: dict | None = None,
+    http_client: httpx.AsyncClient | None = None,
+    request_id: int = 1,
+    timeout: float = 30,
+) -> tuple[int, dict]:
+    """Single-shot JSON-RPC request to a stateless mcp-app server.
+
+    The server runs with ``stateless_http=True`` and ``json_response=True``
+    so a single POST with ``Accept: application/json`` is sufficient — no
+    SSE session, no 3-request handshake. Returns ``(status_code, body)``.
     """
     client = http_client or httpx.AsyncClient()
     try:
         resp = await client.post(
             url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-            json={"jsonrpc": "2.0", "method": "tools/list", "id": 1},
-            timeout=15,
+            headers=_mcp_headers(token),
+            json=_mcp_body(method, params, request_id),
+            timeout=timeout,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        tools = data.get("result", {}).get("tools", [])
-        return sorted(t["name"] for t in tools)
+        return resp.status_code, resp.json()
     finally:
         if http_client is None:
             await client.aclose()
+
+
+async def _mcp_list_tools(
+    url: str, token: str, http_client: httpx.AsyncClient | None = None,
+) -> list[str]:
+    """MCP tools/list round-trip — returns sorted tool names."""
+    _, data = await mcp_request(url, token, "tools/list", None, http_client, request_id=1, timeout=15)
+    tools = data.get("result", {}).get("tools", [])
+    return sorted(t["name"] for t in tools)
+
+
+async def _mcp_list_tools_full(
+    url: str, token: str, http_client: httpx.AsyncClient | None = None,
+) -> list[dict]:
+    """MCP tools/list round-trip — returns full tool dicts (name, description, inputSchema)."""
+    _, data = await mcp_request(url, token, "tools/list", None, http_client, request_id=1, timeout=15)
+    return data.get("result", {}).get("tools", [])

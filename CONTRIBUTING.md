@@ -135,6 +135,8 @@ be kept in sync on every change:
 | Environment variables table | Full | Full | Referenced |
 | User management CLI commands | Full | Full | Full |
 | Post-deploy verification (probe, register) | Summary | Summary | Full |
+| Six-rung verification ladder (probe → tools → safe-tool) | Summary | Summary | Full |
+| `SafeTool` authoring guidance (low-info-density rules) | Summary | Full | Pointer |
 | Signing-key retrieval | Summary | Pointer | Full |
 | Deployment-agnostic posture | Full | Full | Implicit |
 | Six-journey map | Not present | Full | Journeys 4–6 |
