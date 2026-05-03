@@ -13,6 +13,7 @@ import contextlib
 import functools
 import importlib
 import inspect
+import os
 from dataclasses import dataclass
 from functools import cached_property
 from types import ModuleType
@@ -27,6 +28,7 @@ from mcp_app.admin import create_admin_app
 from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
 from mcp_app.middleware import JWTMiddleware
+from mcp_app.storage_check import verify_storage
 from mcp_app.verifier import JWTVerifier
 
 
@@ -157,7 +159,15 @@ class App:
 
     def _build_store(self):
         cls = _resolve_class(self.store_backend, STORE_ALIASES)
-        return cls(app_name=self.name)
+        store = cls(app_name=self.name)
+        # The data-dir startup check applies to filesystem-backed stores.
+        # Other store backends (database, KV, anything without `.base`)
+        # have their own persistence story that the framework doesn't
+        # introspect.
+        data_path = getattr(store, "base", None)
+        if data_path is not None:
+            verify_storage(data_path, os.environ.get("REQUIRED_FS_TYPE"))
+        return store
 
     def _build_asgi(self):
         """Assemble the Starlette ASGI stack: health, admin, MCP + middleware."""

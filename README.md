@@ -32,6 +32,11 @@ mcp-app gives you:
 - **Free tests for your app.** `mcp_app.testing` checks auth,
   admin, wiring, and tool coverage against your specific app.
   Import the tests, run pytest, confirm everything works.
+- **Persistence verification at startup.** Every server start
+  logs the resolved data directory, its filesystem type, and
+  free space. Set one env var and the process refuses to come
+  up if the data dir is on the wrong filesystem — so a misconfigured
+  volume mount can't silently route writes to ephemeral storage.
 - **Deployment-ready.** Container, bare metal, Cloud Run, or gapp.
 
 The consistency is the point. User management, token rotation, auth
@@ -131,7 +136,10 @@ and store wiring are handled by the framework from the Python args.
 
 Default store is filesystem — per-user directories under
 `~/.local/share/{name}/users/`. Override with `APP_USERS_PATH`
-env var. Custom store backends can be passed to `App`.
+env var. Custom store backends can be passed to `App`. See
+[Data storage](#data-storage) for the full storage contract,
+the startup `data_dir` log line, and the optional
+`REQUIRED_FS_TYPE` assertion.
 
 ### Middleware
 
@@ -193,6 +201,7 @@ The `tools` module is imported and all public async functions (not starting with
 | `SIGNING_KEY` | For HTTP | Startup fails | JWT signing key |
 | `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
+| `REQUIRED_FS_TYPE` | No | No assertion | Opt-in startup assertion that the data dir lives on a specific filesystem type. See [Data storage](#data-storage). |
 | `TOKEN_DURATION_SECONDS` | No | 315360000 (~10yr) | Token lifetime in seconds |
 
 **`SIGNING_KEY`** is a secret. Never commit it to the repo. Generate
@@ -222,6 +231,98 @@ mounted volume or persistent storage path.
 **`TOKEN_DURATION_SECONDS`** — the default (~10 years) effectively
 means tokens are permanent. Set a shorter value if tokens should
 expire. Applies to newly issued tokens only.
+
+**`REQUIRED_FS_TYPE`** — opt-in startup assertion. See [Data storage](#data-storage).
+
+## Data storage
+
+mcp-app's default `FileSystemUserDataStore` writes per-user data
+under a single root directory. The path resolves with this
+precedence:
+
+1. `APP_USERS_PATH` env var, if set.
+2. `${XDG_DATA_HOME}/{app-name}/users/`, with `XDG_DATA_HOME`
+   defaulting to `~/.local/share`.
+
+**Storage contract.** Anything mcp-app writes for a user lives
+under this root. The directory must be a durable location in any
+non-ephemeral deployment. In a container without a mounted volume
+the path resolves to the container's overlay filesystem — writes
+look fine, the app appears healthy, and every record disappears
+when the container restarts. There is no warning.
+
+### Startup data_dir log line
+
+On every server start (HTTP or stdio) mcp-app emits one
+`logger.info` line under the `mcp_app.startup` logger summarizing
+the resolved data directory:
+
+```
+INFO mcp_app.startup data_dir path=/var/lib/my-app/users exists=true writable=true fs_type=fuse.gcsfuse free_bytes=137438953472 required_fs_type=<unset>
+```
+
+Fields:
+
+| Field | Meaning |
+|-------|---------|
+| `path` | Resolved absolute path (post-`APP_USERS_PATH`/XDG resolution). |
+| `exists` | Whether the path exists after startup. mcp-app creates it if missing. |
+| `writable` | Result of a sentinel write+delete in the path. |
+| `fs_type` | Filesystem type as reported by the OS. `unknown` if the platform doesn't expose it. |
+| `free_bytes` | Free space in bytes from `statvfs`. `-1` if unavailable. |
+| `required_fs_type` | Value of `REQUIRED_FS_TYPE`, or `<unset>`. |
+
+The log line is plain facts — no policy. An operator (or a
+log-scraping monitor) decides what's acceptable.
+
+#### `fs_type` interpretation
+
+mcp-app reports the raw string from the OS. Common values an
+operator should recognize:
+
+| `fs_type` | What it means |
+|-----------|---------------|
+| `fuse`, `fuse.gcsfuse`, `nfs`, `smbfs`, `cifs` | Mounted network or object storage — durable. |
+| `overlay`, `overlayfs` | Container ephemeral layer — **writes here vanish on restart**. |
+| `ext4`, `xfs`, `apfs`, `btrfs`, `zfs`, `hfs` | Local disk — durable. |
+| `tmpfs` | In-memory — lost on restart. |
+| `unknown` | Platform doesn't expose fs type or detection failed. |
+
+### Optional `REQUIRED_FS_TYPE` assertion
+
+Set `REQUIRED_FS_TYPE` to opt into a startup assertion. mcp-app
+compares it against the actual `fs_type` and either records the
+match or aborts the process.
+
+| `REQUIRED_FS_TYPE` state | `fs_type` matches? | Behavior |
+|--------------------------|--------------------|----------|
+| Unset (or empty)         | n/a                | `logger.debug` notes the assertion was skipped. The `data_dir` info line shows `required_fs_type=<unset>`. |
+| Set                      | Yes                | `logger.info` emits one combined line including `fs_type_check=ok`. |
+| Set                      | No, or path missing/not writable | `logger.error` emits one combined line including `fs_type_check=mismatch` (or `path_missing`/`not_writable`). The process exits non-zero so the broken revision never serves traffic. |
+
+**Matching semantics.** The value is matched as a comma-separated
+list, prefix-friendly on `.` boundaries:
+
+- `fuse` matches `fuse` and `fuse.gcsfuse` (prefix on `.`).
+- `fuse,nfs` matches either.
+- `apfs` matches only `apfs` exactly.
+- Whitespace around commas is ignored. Empty entries are skipped.
+
+The default behavior (unset) is unchanged from earlier versions —
+local development, laptops, CI, and any deployment that doesn't
+care are not affected.
+
+**Why opt-in.** mcp-app cannot know whether ephemeral storage is
+intended. `overlayfs` is correct on a developer laptop using
+Docker for iteration; it's a data-loss bug on a production
+deployment that was supposed to mount a volume. The framework
+reports facts and lets the operator declare what's acceptable.
+
+**Why always log `required_fs_type`, even when unset.** A single
+line shows whether the assertion was wired up. If a deployment is
+*supposed* to be setting `REQUIRED_FS_TYPE` and the line shows
+`<unset>`, the wiring is broken — visible immediately, no second
+log line needed.
 
 ## User Identity and Profile
 

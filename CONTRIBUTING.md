@@ -182,6 +182,9 @@ Legend for the per-artifact columns:
 | Two app patterns (data-owning vs API-proxy) | README | Full | Full | Implicit |
 | Tool discovery rules | README | Full | Full | — |
 | Environment variables (canonical table) | README | Full | Full | Referenced |
+| Data storage (path resolution + storage contract) | README | Full | Summary | Referenced |
+| Startup `data_dir` log line + fields | README | Full | Summary | Referenced |
+| `REQUIRED_FS_TYPE` assertion (matching, behavior, opt-in posture) | README | Full | Summary | Summary |
 | User Identity and Profile (concept + ContextVar) | README | Full | Full | Referenced |
 | Profile model declaration (`profile_expand`, fields) | README | Full | Full | — |
 | Admin REST endpoints (the API contract) | README | Full | Referenced | Referenced |
@@ -591,6 +594,33 @@ check (e.g., "can I reach my database") would mean hitting the
 store on every health ping, which is unnecessary I/O for a probe
 that fires every 10 seconds. App-specific readiness checks belong
 in the app, not the framework.
+
+### Framework reports facts about its environment; it does not enforce policy
+
+The startup `data_dir` log line and the optional `REQUIRED_FS_TYPE`
+assertion follow a deliberate split: mcp-app reports — in plain
+fields — what it found when it inspected the data directory at
+startup (path, fs_type, free space, writable). It does not decide
+whether the result is acceptable. The optional `REQUIRED_FS_TYPE`
+env var is the operator's mechanism for declaring acceptability;
+when set, mcp-app aborts on mismatch.
+
+This split is the framework's general posture: any future
+environment introspection (mount source, network reachability,
+upstream credential validity, anything mcp-app could plausibly
+inspect at startup) follows the same pattern. The fact gets
+reported. A separate, opt-in operator declaration turns reporting
+into enforcement. Defaulting to enforcement would tie the
+framework to a particular deployment shape — `overlayfs` is
+correct on a developer laptop running Docker for iteration, and
+the framework cannot tell that situation apart from a production
+deployment that meant to mount a volume but didn't.
+
+The reverse principle is just as important: do not omit the fact
+on the grounds that "we can't enforce it anyway." A reported fact
+in the log is what lets an operator (or a log-scraping monitor) build
+their own policy on top, even when the framework deliberately ships
+no policy of its own.
 
 ### stdio identity comes from --user, not yaml
 
