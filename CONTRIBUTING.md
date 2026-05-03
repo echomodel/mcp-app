@@ -185,6 +185,10 @@ Legend for the per-artifact columns:
 | Data storage (path resolution + storage contract) | README | Full | Summary | Referenced |
 | Startup `data_dir` log line + fields | README | Full | Summary | Referenced |
 | `REQUIRED_FS_TYPE` assertion (matching, behavior, opt-in posture) | README | Full | Summary | Summary |
+| `/health` response shape (status enum, checks object, HTTP code mapping) | README | Full | Summary | Summary |
+| `/health` enum-only / identity-free contract | CONTRIBUTING | Summary | Referenced | Referenced |
+| `/admin/health` admin diagnostic surface | README | Full | Pointer | Full |
+| Health check naming convention (contract, not mechanism) | CONTRIBUTING | — | Referenced | — |
 | User Identity and Profile (concept + ContextVar) | README | Full | Full | Referenced |
 | Profile model declaration (`profile_expand`, fields) | README | Full | Full | — |
 | Admin REST endpoints (the API contract) | README | Full | Referenced | Referenced |
@@ -581,19 +585,70 @@ the code is in a public repo — anyone who reads it can forge JWTs.
 `SIGNING_KEY` must be explicitly set as an environment variable for
 HTTP mode. Missing or empty raises `RuntimeError` at startup.
 
-### /health is a liveness check, not a readiness check
+### /health is structured, but reads only cached startup state
 
-The `/health` endpoint returns `{"status": "ok"}` with no auth
-required. It exists for Cloud Run (and similar platforms) to confirm
-the process is alive and accepting HTTP requests.
+`GET /health` returns a structured `{status, checks}` object with
+no auth required. `status` ∈ `{healthy, degraded, unhealthy}` and
+maps to HTTP 200 / 200 / 503. The body is intentionally enum-only
+and identity-free — see "/health is enum-only and identity-free"
+below.
 
-It does not check store connectivity, tool module loading, or
-middleware wiring. Those happen at startup — if any of them fail,
-the process crashes and the platform restarts it. A deeper readiness
-check (e.g., "can I reach my database") would mean hitting the
-store on every health ping, which is unnecessary I/O for a probe
-that fires every 10 seconds. App-specific readiness checks belong
-in the app, not the framework.
+The endpoint reads only state that was computed once at startup
+(e.g., the cached `mcp_app.storage_check.get_last_check()` result).
+There is no per-request `statvfs`, no store ping, no tool module
+re-import. /health stays cheap and deterministic — it reports what
+was true at startup. If a deeper live re-probe is needed, it lives
+on the admin-authenticated surface (`/admin/health`) or via
+restarting the revision.
+
+This split exists because /health is typically polled every few
+seconds by infrastructure. Doing a live probe per call would
+compound into significant load and risk false negatives on transient
+hiccups (e.g., FUSE mount blips). Caching the startup verdict means
+the platform's health check is fast and stable; live probes are an
+operator concern, not a framework one.
+
+App-specific readiness checks (e.g., "can I reach my database")
+belong in the app, not the framework. The framework's /health
+covers framework-defined checks only.
+
+### /health is enum-only and identity-free
+
+The public /health response carries the verdict and nothing else.
+It must NOT include any of:
+
+- The resolved data path
+- The actual `fs_type` string
+- The expected `REQUIRED_FS_TYPE` value
+- Free bytes, mount source, device, inode, statvfs detail
+- The path of any sentinel file or write probe
+
+Adding any of those leaks the deployment shape (storage technology,
+cloud provider, mount layout, sometimes the cluster) to every caller
+that can reach the unauthenticated endpoint — uptime monitors, load
+balancers, internet probes. Identifying detail belongs on
+`/admin/health` (auth-gated) and in startup logs.
+
+The boundary lives at `mcp_app.health_check.build_health_response`.
+A future contributor adding a new check must keep it. Reviewers
+should reject any patch that puts identifying detail behind the
+unauthenticated /health.
+
+### Health check naming describes the contract, not the mechanism
+
+Each `checks.<key>` describes the *invariant* it asserts, not the
+technology that delivers it. `persistent_storage` was chosen over
+`disk` (implies block device), `volume_mount` (exposes the
+implementation), `data_persistence` (verbose; "data" is implicit),
+or `storage` (too vague — `/tmp` is also storage). It reads as a
+question: "is persistent storage verified, unverified, or
+unavailable?"
+
+Future check keys follow the same convention: name the contract.
+A check that asserts JWT signing-key load is `signing_key_loaded`,
+not `jwt_secret_present`. A check that asserts an upstream API is
+reachable is `upstream_reachable`, not `api_call_succeeds`. The
+underlying mechanism may change; the contract usually doesn't.
 
 ### Framework reports facts about its environment; it does not enforce policy
 

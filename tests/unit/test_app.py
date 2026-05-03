@@ -134,7 +134,9 @@ def test_app_is_asgi_callable_via_httpx(tools_module, tmp_path):
         r1, r2 = asyncio.run(run())
         assert r1.status_code == 200
         assert r2.status_code == 200
-        assert r1.json() == {"status": "ok"}
+        body = r1.json()
+        assert body["status"] in {"healthy", "degraded"}
+        assert "checks" in body
         assert app._asgi is not None
     finally:
         del os.environ["APP_USERS_PATH"]

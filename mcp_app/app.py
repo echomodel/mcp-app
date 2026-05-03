@@ -27,6 +27,7 @@ from starlette.routing import Mount, Route
 from mcp_app.admin import create_admin_app
 from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
+from mcp_app.health_check import build_health_response
 from mcp_app.middleware import JWTMiddleware
 from mcp_app.storage_check import verify_storage
 from mcp_app.verifier import JWTVerifier
@@ -207,7 +208,11 @@ class App:
                 yield
 
         async def health(_):
-            return JSONResponse({"status": "ok"})
+            # Public, identity-free response. Full diagnostic detail lives
+            # behind admin auth at /admin/health and in startup logs.
+            # See mcp_app.health_check.build_health_response.
+            body, code = build_health_response()
+            return JSONResponse(body, status_code=code)
 
         return Starlette(
             routes=[

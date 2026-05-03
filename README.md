@@ -432,6 +432,9 @@ REST admin endpoints are mounted at `/admin` in HTTP mode:
 - `POST /admin/tokens` — issue new token for existing user
 - `GET /admin/safe-tool` — return the deployment's safe-tool declaration
   (or a structured "not declared" envelope)
+- `GET /admin/health` — full health diagnostic detail (paths, fs_type,
+  free bytes, mount source) that the public `/health` intentionally
+  omits. See [Health endpoint](#health-endpoint).
 
 Gated by admin-scoped JWT (`scope: "admin"`, same signing key).
 
@@ -485,6 +488,108 @@ The tools shown are exactly the tools the solution registered via its
 tools module — no separate declaration needed. `safe-tool` curates,
 `tools` enumerates; both serve different operators in different
 moments.
+
+## Health endpoint
+
+`GET /health` returns a structured response that platform health
+checks (Cloud Run readiness, Kubernetes liveness, uptime monitors)
+can act on. It requires no auth.
+
+```json
+{
+  "status": "healthy",
+  "checks": {
+    "persistent_storage": "verified"
+  }
+}
+```
+
+### Status enum
+
+| `status` | HTTP code | Meaning |
+|----------|-----------|---------|
+| `healthy`   | 200 | All declared checks passing. |
+| `degraded`  | 200 | Concern surfaced (e.g., `unverified` storage); safe to serve. |
+| `unhealthy` | 503 | A required check failed; deflect traffic. |
+
+The 503 mapping is what makes a structurally broken revision actually
+get pulled out of rotation by the platform. Without it, /health would
+be cosmetic.
+
+### checks.persistent_storage
+
+| Value | Meaning |
+|-------|---------|
+| `verified` | `REQUIRED_FS_TYPE` was set, the actual filesystem matched, and the data path is writable. |
+| `unverified` | `REQUIRED_FS_TYPE` was not set; the framework deliberately did not assert the filesystem. Normal for development. |
+| `unavailable` | The check failed — fs_type mismatch with `REQUIRED_FS_TYPE`, missing path, or not writable. Drives `unhealthy` and HTTP 503. |
+
+`unhealthy` only fires when an operator opted into `REQUIRED_FS_TYPE`
+and the contract was violated. Without that opt-in the framework
+cannot know whether ephemeral storage was intended (it's normal on a
+dev laptop), so the worst it produces is `degraded`. See
+[Data storage](#data-storage) for `REQUIRED_FS_TYPE`.
+
+### Identity-free public response
+
+The public response carries the verdict only — never the resolved
+path, the actual `fs_type`, the expected `REQUIRED_FS_TYPE` value,
+free bytes, mount source, or any other identifying detail.
+
+Identifying detail leaks the deployment shape (storage technology,
+cloud provider, mount layout) to anyone who can reach `/health`,
+which is unauthenticated. Operators who need the underlying detail
+use the admin surface or the startup logs.
+
+### Admin surface for full detail
+
+`GET /admin/health` (admin-scoped JWT) returns the full diagnostic:
+
+```json
+{
+  "status": "unhealthy",
+  "http_status": 503,
+  "checks": {"persistent_storage": "unavailable"},
+  "details": {
+    "persistent_storage": {
+      "path": "/var/lib/my-app/users",
+      "exists": true,
+      "writable": true,
+      "fs_type": "overlay",
+      "free_bytes": 1234567,
+      "required_fs_type": "fuse",
+      "fs_type_check": "mismatch",
+      "mount_source": "overlay"
+    }
+  }
+}
+```
+
+Use this when `/health` reports `degraded` or `unhealthy` and you
+need to know why without consulting startup logs.
+
+### Adding a check (for framework contributors)
+
+Future checks land in `mcp_app.health_check`:
+
+1. Define the check's enum (its own value domain — describing the
+   contract, not the mechanism).
+2. Add the entry to `_STORAGE_CHECK_TO_PUBLIC` (or analogous map).
+3. Document its aggregation rule (what produces `unhealthy` vs
+   `degraded`).
+4. Add the test coverage at the same time, including an
+   identity-free assertion on the public payload.
+
+The public response shape never changes — new checks add a new key
+to the `checks` object.
+
+### Migration from `{"status": "ok"}`
+
+Earlier versions returned `{"status": "ok"}`. The new shape is the
+shape — there is no compatibility shim. Consumers that pattern-matched
+the literal `"ok"` should match against `status in ("healthy",
+"degraded")` for "should I send traffic" semantics, which is the
+boundary the framework itself uses for HTTP 200 vs 503.
 
 ## Local Testing
 

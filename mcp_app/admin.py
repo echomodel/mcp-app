@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from mcp_app.health_check import build_admin_health_detail
 from mcp_app.models import UserAuthRecord
 from mcp_app.store import UserAuthStore
 
@@ -188,6 +189,18 @@ def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
         duration = body.get("duration_seconds", get_default_token_duration())
         return JSONResponse(_issue_token(email, duration))
 
+    async def get_admin_health(request: Request) -> JSONResponse:
+        """Full health diagnostic detail. Admin auth required.
+
+        Mirrors what the public /health returns, plus the underlying
+        per-check raw fields (path, fs_type, free_bytes, etc.) that
+        the public response intentionally omits. Use this when /health
+        reports degraded or unhealthy and you need to know why.
+        """
+        if not _verify_admin(request):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        return JSONResponse(build_admin_health_detail())
+
     async def get_safe_tool(request: Request) -> JSONResponse:
         """Return the solution's safe-tool declaration, or an unsupported envelope.
 
@@ -225,4 +238,5 @@ def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
         Route("/users/{email:path}", revoke_user, methods=["DELETE"]),
         Route("/tokens", create_token, methods=["POST"]),
         Route("/safe-tool", get_safe_tool, methods=["GET"]),
+        Route("/health", get_admin_health, methods=["GET"]),
     ])

@@ -56,9 +56,15 @@ def _user_token(email, key="tck-test-key-32chars-minimum-len!!"):
 
 @pytest.mark.asyncio
 async def test_health_returns_200(asgi_client):
+    """Public /health is auth-free and returns the structured status enum.
+
+    The conformance contract pins ``status`` ∈ {healthy, degraded} for a
+    serving instance — ``unhealthy`` would be HTTP 503 and is covered by
+    the dedicated unit tests.
+    """
     resp = await asgi_client.get("/health")
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
+    assert resp.json()["status"] in {"healthy", "degraded"}
 
 
 @pytest.mark.asyncio
