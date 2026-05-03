@@ -79,10 +79,24 @@ async def test_call_tool_with_arguments_round_trip(full_stack):
 
 
 @pytest.mark.asyncio
-async def test_list_tools_no_users_raises(full_stack):
+async def test_list_tools_no_users_raises_typed_exception(full_stack):
+    """Adapter raises NoProbeUserError specifically — not bare RuntimeError —
+    so CLI helpers can catch it without swallowing other failures."""
+    from mcp_app.admin_client import NoProbeUserError
     adapter, _ = full_stack
-    with pytest.raises(RuntimeError):
+    with pytest.raises(NoProbeUserError) as exc_info:
         await adapter.list_tools()
+    # The message must point the operator at the corrective action.
+    assert "users add" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_call_tool_no_users_raises_typed_exception(full_stack):
+    from mcp_app.admin_client import NoProbeUserError
+    adapter, _ = full_stack
+    with pytest.raises(NoProbeUserError) as exc_info:
+        await adapter.call_tool("ping", {})
+    assert "users add" in str(exc_info.value)
 
 
 # --- Argument coercion tests ---
@@ -280,3 +294,110 @@ def test_tools_call_unknown_tool_errors_when_using_args(monkeypatch):
     assert result.exit_code != 0
     msg = (result.output + (result.stderr or "")).lower()
     assert "unknown tool" in msg
+
+
+# --- CLI-level tests for the empty-deployment (no users) state ---
+
+class _NoUsersAdapter:
+    """Stub that mimics what every adapter method does when the
+    deployment has no registered users to mint a probe token for."""
+
+    async def list_tools(self, user_email=None):
+        from mcp_app.admin_client import NoProbeUserError
+        raise NoProbeUserError(
+            "No registered users on this deployment — cannot mint a "
+            "probe token. Register one first with `users add <email>`."
+        )
+
+    async def call_tool(self, name, arguments, user_email=None):
+        from mcp_app.admin_client import NoProbeUserError
+        raise NoProbeUserError(
+            "No registered users on this deployment — cannot mint a "
+            "token to invoke a tool. Register one first with "
+            "`users add <email>`."
+        )
+
+    async def get_safe_tool(self):
+        # safe-tool metadata fetch always succeeds — only the --invoke
+        # path needs a probe user. Mirror admin.py's "supported" envelope.
+        return {
+            "schema_version": "1",
+            "supported": True,
+            "tool": {"name": "ping", "description": "ok", "arguments": {}},
+        }
+
+
+def _no_users_stub():
+    adapter = _NoUsersAdapter()
+    return lambda app_name: adapter
+
+
+def _assert_no_stack_trace(output: str):
+    # Click formats ClickException as "Error: <message>". A bubbled
+    # RuntimeError would surface as a Python traceback containing
+    # 'Traceback (most recent call last):'. We must never see the latter.
+    assert "Traceback" not in output, (
+        f"Stack trace leaked to operator output:\n{output}"
+    )
+
+
+def test_tools_list_no_users_clean_error(monkeypatch):
+    from mcp_app import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _no_users_stub())
+    admin_cli = cli_mod.create_admin_cli("myapp")
+    runner = CliRunner()
+    result = runner.invoke(admin_cli, ["tools", "list"])
+    assert result.exit_code != 0
+    out = result.output + (result.stderr or "")
+    _assert_no_stack_trace(out)
+    assert "users add" in out
+
+
+def test_tools_show_no_users_clean_error(monkeypatch):
+    from mcp_app import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _no_users_stub())
+    admin_cli = cli_mod.create_admin_cli("myapp")
+    runner = CliRunner()
+    result = runner.invoke(admin_cli, ["tools", "show", "ping"])
+    assert result.exit_code != 0
+    out = result.output + (result.stderr or "")
+    _assert_no_stack_trace(out)
+    assert "users add" in out
+
+
+def test_tools_call_no_users_clean_error_with_args(monkeypatch):
+    from mcp_app import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _no_users_stub())
+    admin_cli = cli_mod.create_admin_cli("myapp")
+    runner = CliRunner()
+    result = runner.invoke(admin_cli, ["tools", "call", "ping", "--arg", "k=v"])
+    assert result.exit_code != 0
+    out = result.output + (result.stderr or "")
+    _assert_no_stack_trace(out)
+    assert "users add" in out
+
+
+def test_tools_call_no_users_clean_error_with_body(monkeypatch):
+    """The --body path skips the schema lookup and goes straight to
+    call_tool. The no-users error must still surface cleanly."""
+    from mcp_app import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _no_users_stub())
+    admin_cli = cli_mod.create_admin_cli("myapp")
+    runner = CliRunner()
+    result = runner.invoke(admin_cli, ["tools", "call", "ping", "--body", "{}"])
+    assert result.exit_code != 0
+    out = result.output + (result.stderr or "")
+    _assert_no_stack_trace(out)
+    assert "users add" in out
+
+
+def test_safe_tool_invoke_no_users_clean_error(monkeypatch):
+    from mcp_app import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _no_users_stub())
+    admin_cli = cli_mod.create_admin_cli("myapp")
+    runner = CliRunner()
+    result = runner.invoke(admin_cli, ["safe-tool", "--invoke"])
+    assert result.exit_code != 0
+    out = result.output + (result.stderr or "")
+    _assert_no_stack_trace(out)
+    assert "users add" in out

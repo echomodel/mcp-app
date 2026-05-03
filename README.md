@@ -827,6 +827,13 @@ show <name>` renders the schema and a copy-pasteable invocation
 example. Useful as a sanity check that the tools module loaded and
 the names match expectations.
 
+These commands mint a per-user probe token to do the JSON-RPC
+round-trip, so they require at least one registered user (Step 2
+above). On a deployment with no users they exit with a clean error
+pointing at `users add` rather than degrading to liveness only —
+because there's no useful tools-list output without the round-trip.
+`probe` is the right tool for liveness checks pre-registration.
+
 **5. End-to-end smoke test (if the app declared a safe tool):**
 ```bash
 my-app-admin safe-tool --invoke
@@ -836,6 +843,12 @@ Confirms the full stack — framework + solution-specific tool wiring
 + upstream credential + response shape. The JSON-RPC request body
 is printed before the call so you can copy and replay it from a
 debugger or another terminal.
+
+`safe-tool --invoke` requires a registered user (same reason as
+`tools list`). The bare `safe-tool` (no `--invoke`) only fetches
+the declaration metadata and works on a fresh deployment with no
+users — handy for confirming the safe tool is declared before
+adding users.
 
 | `probe` | `safe-tool --invoke` | Likely problem |
 |---|---|---|

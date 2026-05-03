@@ -381,6 +381,16 @@ invocation example. Useful when you don't remember a tool's
 schema or want to debug a specific tool's contract before
 calling it.
 
+**Requires a registered user.** Unlike `probe`, which can
+report liveness-only when the deployment has no users,
+`tools list` and `tools show` mint a per-user probe token to
+do the MCP `tools/list` round-trip. On a deployment with no
+registered users they exit with a clean error pointing at
+`users add` rather than degrading to a liveness check —
+because there's no useful "tools list" output to render
+without the round-trip. Run Step 4 (`users add`) first if
+you haven't.
+
 ### 3c: safe-tool --invoke (deeper than probe)
 
 Probe stops at `tools/list`. It does **not** exercise the
@@ -399,6 +409,13 @@ The CLI prints the JSON-RPC request body **before** sending so
 an operator can copy and replay it manually in a debugger or
 another terminal, with a different bearer token, etc. After the
 call it prints the HTTP status code and the full response body.
+
+**`safe-tool --invoke` requires a registered user** for the
+same reason as `tools list/show`: the round-trip mints a
+per-user probe token. The bare `safe-tool` (no `--invoke`)
+only fetches the declaration metadata and does not need a
+user — handy for confirming the safe tool is declared on a
+fresh deployment before you've added any users.
 
 #### Failure-mode table
 

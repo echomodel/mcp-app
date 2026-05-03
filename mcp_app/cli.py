@@ -59,6 +59,33 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _run_probe(coro):
+    """Run a coroutine that may need a probe user; translate failures to a clean CLI error.
+
+    Adapter calls that mint a per-user probe token (``list_tools``,
+    ``call_tool``) raise ``NoProbeUserError`` when the deployment has
+    no registered users. The CLI translates that into a
+    ``click.ClickException`` so the operator sees an actionable
+    one-line message — never a stack trace — pointing at
+    ``users add <email>``.
+
+    NOTE on user selection: today the adapter's underlying
+    ``_pick_probe_user`` falls back to "any registered user" when no
+    explicit ``--user`` is provided. That auto-pick can mint a probe
+    token under a real user's identity, so an operator running these
+    commands ends up acting as that user against the upstream. A
+    follow-up issue tracks replacing the auto-pick with an explicit,
+    operator-configured probe identity. Until that lands, callers
+    should be deliberate about ``--user`` for any tool invocation
+    that would touch user data.
+    """
+    from mcp_app.admin_client import NoProbeUserError
+    try:
+        return _run(coro)
+    except NoProbeUserError as exc:
+        raise click.ClickException(str(exc))
+
+
 def _connect_handler(target: str, signing_key: str | None, app_name: str | None):
     """Shared connect logic for both generic and per-app CLIs.
 
@@ -543,7 +570,7 @@ def _safe_tool_command(invoke, as_json, user, app_name: str | None):
                 "Cannot invoke — no safe tool declared by this deployment."
             )
         tool = envelope["tool"]
-        result = _run(adapter.call_tool(tool["name"], tool.get("arguments") or {}, user_email=user))
+        result = _run_probe(adapter.call_tool(tool["name"], tool.get("arguments") or {}, user_email=user))
         envelope["invocation"] = result["invocation"]
         envelope["result"] = result["result"]
         envelope["probed_as"] = result["probed_as"]
@@ -557,7 +584,7 @@ def _safe_tool_command(invoke, as_json, user, app_name: str | None):
 def _tools_list_command(as_json, user, app_name: str | None):
     """Shared body for `tools list`."""
     adapter = _require_remote_adapter(app_name)
-    tools, probed_as = _run(adapter.list_tools(user_email=user))
+    tools, probed_as = _run_probe(adapter.list_tools(user_email=user))
     if as_json:
         click.echo(json.dumps({"tools": tools, "probed_as": probed_as}, indent=2))
         return
@@ -576,7 +603,7 @@ def _tools_list_command(as_json, user, app_name: str | None):
 def _tools_show_command(name, as_json, user, app_name: str | None):
     """Shared body for `tools show <name>`."""
     adapter = _require_remote_adapter(app_name)
-    tools, _ = _run(adapter.list_tools(user_email=user))
+    tools, _ = _run_probe(adapter.list_tools(user_email=user))
     matches = [t for t in tools if t["name"] == name]
     if not matches:
         cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
@@ -602,7 +629,7 @@ def _tools_call_command(name, arg_pairs, json_body, as_json, user, app_name: str
                 "--json must be a JSON object (not array/scalar)."
             )
     else:
-        tools, _ = _run(adapter.list_tools(user_email=user))
+        tools, _ = _run_probe(adapter.list_tools(user_email=user))
         matches = [t for t in tools if t["name"] == name]
         if not matches:
             cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
@@ -611,7 +638,7 @@ def _tools_call_command(name, arg_pairs, json_body, as_json, user, app_name: str
             )
         arguments = _parse_args_pairs(arg_pairs, matches[0].get("inputSchema"))
 
-    result = _run(adapter.call_tool(name, arguments, user_email=user))
+    result = _run_probe(adapter.call_tool(name, arguments, user_email=user))
     if as_json:
         click.echo(json.dumps(result, indent=2))
         return

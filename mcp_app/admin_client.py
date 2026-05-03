@@ -14,6 +14,17 @@ import jwt as pyjwt
 from mcp_app.models import UserAuthRecord, UserRecord
 
 
+class NoProbeUserError(RuntimeError):
+    """Raised when an admin command needs a user identity to mint a probe
+    token but none is available on the deployment.
+
+    Typed so CLI helpers can catch it and surface an actionable message
+    (rather than a stack trace) without swallowing other RuntimeError
+    sources. The default str(exc) message is suitable for direct display
+    via click.ClickException.
+    """
+
+
 class RemoteAuthAdapter:
     """UserAuthStore implementation backed by a remote mcp-app instance."""
 
@@ -200,10 +211,19 @@ class RemoteAuthAdapter:
         return active[0].email if active else None
 
     async def list_tools(self, user_email: str | None = None) -> tuple[list[dict], str]:
-        """Run JSON-RPC tools/list. Returns (tools, probed_as)."""
+        """Run JSON-RPC tools/list. Returns (tools, probed_as).
+
+        Raises NoProbeUserError when the deployment has no registered
+        users to mint a probe token for. (Passing --user for a user that
+        isn't registered won't help — auth middleware rejects the
+        unknown email; the deployment must actually have the user.)
+        """
         probed_as = await self._pick_probe_user(user_email)
         if probed_as is None:
-            raise RuntimeError("No registered users — cannot mint a probe token.")
+            raise NoProbeUserError(
+                "No registered users on this deployment — cannot mint a "
+                "probe token. Register one first with `users add <email>`."
+            )
         token = self._user_token(probed_as)
         url = self.base_url + "/"
         tools = await _mcp_list_tools_full(url, token, self._http)
@@ -223,7 +243,11 @@ class RemoteAuthAdapter:
         """
         probed_as = await self._pick_probe_user(user_email)
         if probed_as is None:
-            raise RuntimeError("No registered users — cannot mint a token.")
+            raise NoProbeUserError(
+                "No registered users on this deployment — cannot mint a "
+                "token to invoke a tool. Register one first with "
+                "`users add <email>`."
+            )
         token = self._user_token(probed_as)
         url = self.base_url + "/"
         params = {"name": name, "arguments": arguments}
