@@ -935,19 +935,86 @@ repo successfully, neither skill should be required the next
 time someone (human or agent) opens the repo to do normal
 work on it.
 
-### A note on deployment scope
+### The three-stage lifecycle and where deployment fits
 
-`author-mcp-app` today has only loose handoff mechanics for
-deployment: it describes what the app needs from any
-environment (the runtime contract) and leaves concrete
-deployment to whatever tooling the user has paired with it.
-As the framework grows, `author-mcp-app` may gain the ability
-to agnostically trigger externally-configured build and
-deploy workflows — coordinating the "app is ready" → "app is
-deployed and reachable" handoff without owning the concrete
-environment configs, which continue to live outside the
-solution repo. Until then, that handoff lives in whatever
-deployment skill or tool the user pairs with the author skill.
+An mcp-app solution moves through three stages from working
+tree to operating service:
+
+1. **Author** — write, structure, and locally validate the
+   solution's code. Owned by `author-mcp-app`.
+2. **Deploy** — turn the validated working tree into a
+   reachable URL that passes a minimal health check (`GET
+   /health` returns `{"status": "ok"}`). **Owned by neither
+   mcp-app skill.** This is intentionally external. The
+   *operator* — the human running the deploy, or the agent
+   environment standing in for them — chooses the route,
+   using whatever deployment tooling, skills, plugins,
+   scripts, or context that environment brings. A solution
+   *may* prescribe a particular mechanism (e.g., a Dockerfile
+   plus opinionated CI workflows in the repo), but it need
+   not, and echomodel first-party solutions deliberately do
+   not. The mcp-app skills require only that this stage
+   exists in some form and yields a healthy URL.
+3. **Operate** — connect the admin CLI, verify the deployment
+   end-to-end, manage users, rotate credentials, register MCP
+   clients, troubleshoot. Owned by `mcp-app-admin`. Assumes
+   stage 2 already produced a healthy URL.
+
+**Where stage-2 guidance comes from.** Because mcp-app
+deliberately does not own the deploy step, an agent reaching
+the author → deploy boundary looks for guidance in (in order):
+
+1. **The operator's agent environment** — a deployment skill
+   or plugin loaded for the cloud platform, container
+   orchestrator, or deployment automation the operator uses;
+   any global or user-level context (e.g., agent context
+   files) that describes how this operator deploys mcp-app
+   solutions. This is the primary source for solutions that
+   don't prescribe deployment, and it's where first-party
+   echomodel deployments live.
+2. **The solution's own repo** — if the app prescribes a
+   deployment route, it documents that in `CONTRIBUTING.md`,
+   `CLAUDE.md`, `README.md`, or via in-repo scripts with
+   documented usage. Most solutions don't and shouldn't, but
+   some legitimately do.
+3. **The user.** If neither (1) nor (2) yields a clear path,
+   the agent asks. It does not improvise with raw cloud CLI
+   commands, ad-hoc `curl` calls, or guessed credentials.
+   Absence of stage-2 guidance is a signal that the
+   environment has not been set up for agent-driven deploys
+   on this solution, and the user must direct the next step.
+
+The guidance — wherever it comes from — must let the agent:
+
+- Initiate or trigger deployment with the chosen tooling.
+- Discover the URL of an existing or freshly-produced
+  deployment.
+- Confirm the URL passes the minimal `/health` check before
+  handing off to `mcp-app-admin`.
+
+**Implementing apps should recommend installing both
+mcp-app skills, and pairing with a deployment route.** A
+short footer in the app's README pointing at
+`author-mcp-app`, `mcp-app-admin`, and a note that the
+operator's environment must supply a deployment route (a
+skill, a plugin, or documented manual steps) tells a
+returning operator how the lifecycle is meant to fit
+together. The skills themselves are not prerequisites — the
+app's docs must be self-sufficient — but when both skills are
+loaded *and* a deployment route is arranged, the agent moves
+through the lifecycle with much less prompting.
+
+**Why this split.** mcp-app aspires to a clean separation:
+the framework opinions stop at the runtime contract, and
+deployment opinions live with the operator. Folding the
+deploy step into either skill would couple the framework to a
+specific deployment posture, defeating the agnostic-by-default
+goal — and pushing it onto each implementing app would force
+every solution to carry deployment opinions it doesn't
+otherwise need. The skills coordinate the boundaries
+(`author-mcp-app` decides when authoring is "done";
+`mcp-app-admin` decides what counts as a verified operating
+instance) but neither owns what happens between them.
 
 ## Further Reading
 

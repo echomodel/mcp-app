@@ -257,6 +257,9 @@ Based on this, the solution targets stdio only (simpler — no auth,
 no deployment) or stdio + HTTP (needs auth, deployment planning).
 Both follow the same repo structure.
 
+**End every Greenfield session with the closing handoff** — see
+"Closing out the session: handoff to mcp-app-admin" below.
+
 ### Mode 2: Migration — Port an Existing App
 
 1. Check the mcp-app framework version (see below)
@@ -302,12 +305,146 @@ Both follow the same repo structure.
 5. Propose a migration plan in priority order
 6. Execute with the user's approval
 7. Run the checklist again to verify
+8. **Close out with the handoff** — see "Closing out the session:
+   handoff to mcp-app-admin" below.
 
 ### Mode 3: Review — Evaluate Against Standards
 
 1. Check the mcp-app framework version (see below)
 2. Run the Compliance Checklist and present results as a table
 3. For each failure, explain what's wrong and the fix
+4. **Close out with the handoff** — see "Closing out the session:
+   handoff to mcp-app-admin" below. This applies even when the
+   review finds no gaps and proposes no changes.
+
+### Closing out the session: handoff to deploy and operate
+
+Every author session — Greenfield, Migration, or Review (including
+a Review with no findings) — ends the same way. The mcp-app
+solution lifecycle is three stages: **author** (this skill),
+**deploy** (external — owned by whatever tooling the implementing
+app pairs with), and **operate** (`mcp-app-admin`). Authoring is
+done; the closing handoff is how the agent crosses into the next
+two stages without improvising or shortcutting.
+
+After the mode's own work is done:
+
+1. **Run local validation.** Unit tests must pass. The mcp-app
+   framework test suite (if `tests/framework/` exists) must pass.
+   Optionally, a stdio smoke test (see "Step 3: stdio validation"
+   in Testing and Validation) — recommended for any session that
+   touched the tools module, the SDK, the App composition root,
+   or `pyproject.toml` entry points.
+2. **Report results to the user** — pass/fail per suite, plus
+   any other relevant outputs from this mode (Greenfield: what
+   was built; Migration: what was changed; Review: the compliance
+   table).
+3. **Branch on `mcp-app-admin` availability** (the agent can
+   determine this from the inventory of loaded skills/extensions
+   its platform exposes — no invocation required):
+
+   - **`mcp-app-admin` is available for invocation in the current
+     environment** → ask the user:
+
+     > Local validation is green. Would you like to:
+     > (a) check the status / health / usability of an existing
+     >     cloud deployment of this solution
+     > (b) deploy current code to a cloud target
+     > (c) manage users or rotate credentials on a deployment
+     > (d) register an MCP client (Claude Code, Gemini CLI,
+     >     Claude.ai, etc.) against a deployment
+     > (e) none of the above — we're done
+
+     On (e): the session ends. Do not pre-emptively run cloud
+     checks the user did not ask for.
+
+     On (a), (b), (c), or (d): **the destination is
+     `mcp-app-admin`, but the bridge to get there may have a
+     middle step.** `mcp-app-admin` requires a known, healthy URL
+     to operate against — it does not deploy and it does not
+     discover deployments. Before invoking it:
+
+     - **For (a), (c), (d)** — these assume an existing
+       deployment. If a URL is already known (from prior
+       `connect` config persisted by `mcp-app-admin`, from the
+       implementing app's `README` / `CONTRIBUTING` / `CLAUDE.md`,
+       or from a deployment skill paired with the app), confirm
+       it passes the minimal health check
+       (`GET /health` → `{"status": "ok"}`) and hand off to
+       `mcp-app-admin` immediately. If the URL is unknown,
+       consult the implementing app's deployment guidance —
+       see "When stage-2 guidance must be consulted" below.
+
+     - **For (b)** — deployment is required. This skill does NOT
+       deploy. Consult the implementing app's deployment guidance
+       — see "When stage-2 guidance must be consulted" below.
+       Once the deployment completes and the URL passes the
+       minimal health check, hand off to `mcp-app-admin`.
+
+     **Once the URL is known and healthy, invoke `mcp-app-admin`
+     immediately.** Do not run cloud CLI commands, cloud-provider
+     MCP tools, deployment-tool MCP tools, or `curl` against
+     deployed URLs beyond the single minimal health check.
+     Do not paraphrase or repeat any of `mcp-app-admin`'s
+     commands inline as a "quick reference" — duplication
+     enables shortcut behavior, which is precisely what the
+     handoff exists to prevent. Hand the work to that skill and
+     let it own the route.
+
+   - **`mcp-app-admin` is NOT available for invocation in the
+     current environment** → do NOT present the (a)–(d) options.
+     Tell the user that operating a deployed instance (cloud
+     verification, user management, MCP client registration) lives
+     in a separate skill, `mcp-app-admin`, which is not loaded
+     here. Suggest they install it if those operations are on
+     their roadmap. Then end the session.
+
+     If the user explicitly chooses to proceed into deploy or
+     operate work without installing `mcp-app-admin`, that path
+     is outside this skill's mandate. The agent may use whatever
+     context, tooling, prior guidance, or — as a last resort —
+     clarifying questions to the user it has available. This
+     skill does not dictate the route in that case; it simply
+     does not pretend to.
+
+#### When stage-2 guidance must be consulted
+
+Stage 2 (deploy and discover-deployment) is owned by the
+operator's environment, not by mcp-app's skills and not
+necessarily by the solution's repo. A solution *may* prescribe a
+deployment mechanism, but it need not — and most do not. When the
+agent needs to drive a deployment or discover an existing
+deployment's URL, it consults — in this order:
+
+1. **The operator's agent environment.** A deployment skill or
+   plugin loaded for the cloud platform / orchestrator / deploy
+   automation the operator uses; any global or user-level
+   context describing how this operator deploys mcp-app
+   solutions. This is the primary source for solutions that
+   don't prescribe deployment. If a relevant deployment skill
+   is loaded, drive it — the skill's responsibility is to
+   produce a URL and confirm liveness.
+2. **The solution's own repo guidance** — `CONTRIBUTING.md`,
+   `CLAUDE.md`, `README.md`, in-repo deployment scripts with
+   documented usage. Only relevant for solutions that
+   prescribe a route. Follow whatever guidance the repo gives.
+3. **Ask the user.** If neither (1) nor (2) yields a clear
+   path, ask the user to direct the next step. Do not
+   improvise with raw cloud CLI commands or guessed
+   credentials. The absence of stage-2 guidance is a signal
+   that the operator's environment has not been set up for
+   agent-driven deploys on this solution, and the user must
+   make the call.
+
+Once stage 2 produces a URL and that URL passes
+`GET /health` → `{"status": "ok"}`, stage 3 begins — invoke
+`mcp-app-admin`.
+
+This handoff is the ONLY sanctioned route into deploy + operate
+work when `mcp-app-admin` is available. Local validation in
+Step 1 is the last cloud-adjacent action this skill prescribes
+— anything beyond that crosses into stage 2 (external deployment
+guidance) and stage 3 (`mcp-app-admin`).
 
 ### Checking the mcp-app framework version
 
@@ -1431,71 +1568,28 @@ Regardless of route, the agent must ensure:
 
 ### Post-deploy: admin setup, users, and verification
 
-After deployment, the next steps are: retrieve the signing key
-from the deployment environment, connect the admin CLI, register
-users, verify the deployment end-to-end, and generate MCP client
-registration commands. The `mcp-app-admin` skill, if available,
-covers this workflow in detail — including how to trace the
-signing key through various deployment tools (gapp, Terraform,
-cloud secret managers, Docker, CI/CD secrets).
+Post-deploy operations — connecting the admin CLI, retrieving
+the signing key, verifying the deployment end-to-end, registering
+users, rotating credentials, generating MCP client registration
+commands — are owned by the `mcp-app-admin` skill. They are not
+covered here.
 
-**Quick reference** (see `mcp-app-admin` for full guidance):
+When the agent reaches this point in the authoring flow, it
+follows the closing handoff (see "Closing out the session: handoff
+to mcp-app-admin" under Modes). The agent does not paraphrase or
+inline-reference `mcp-app-admin`'s commands as a "quick reference"
+here — duplication is what enables shortcut behavior, and shortcut
+behavior is what bypasses the verification discipline that
+`mcp-app-admin` enforces.
 
-```bash
-# Connect admin CLI (signing key from your deployment tool)
-my-solution-admin connect https://your-service --signing-key xxx
-
-# Probe: health + MCP tools round-trip in one command
-my-solution-admin probe
-
-# Register a user
-my-solution-admin users add alice@example.com
-
-# Sanity-check tool exposure and schemas
-my-solution-admin tools list
-my-solution-admin tools show <name>
-
-# End-to-end smoke test (when a safe tool is declared)
-my-solution-admin safe-tool --invoke
-
-# Debug a specific tool with custom arguments
-my-solution-admin tools call <name> --arg k=v
-
-# Generate MCP client registration commands (mints a token)
-my-solution-admin register --user alice@example.com
-```
-
-The post-deploy verification ladder is six rungs: `connect` →
-`probe` (framework layer) → `tools list` (right tools exposed?)
-→ `tools show <name>` (schema sanity check) → `safe-tool
---invoke` (full end-to-end, if declared) → `tools call <name>`
-(targeted debug). Most deploys only need the first three.
-
-`probe` confirms the deployment is serving tools end-to-end — not
-just that the process is alive (`health`), but that the MCP layer
-responds with the expected tools.
-
-`register --user <email>` mints a token for the named user and
-prints the per-client setup commands the end user runs to add
-the deployment to their MCP client.
-
-When documenting `register` in the implementing app's README, do
-not paraphrase or invent what it prints. Run the command and
-reproduce what it actually outputs. The exact shapes are allowed
-to change between mcp-app releases and across MCP clients, and
-hand-transcribed samples drift from reality silently.
-
-Don't assume a per-client setup shape from the client category.
-MCP clients support varying authentication models — bearer
-headers, tokens in URLs, OAuth2, and likely more over time — and
-the same client may add new options. Whatever shape `register`
-prints for the running app + client + auth combination is the
-source of truth. Documenting it correctly means showing the
-reader what `register` actually produced for this app, not what
-an analogous combination produced elsewhere.
-
-Both `probe` and `register` support `--json` for structured
-output when called from an agent.
+**For the implementing app's README** (a separate concern from
+this skill's runtime handoff), the post-deploy section must
+still be self-sufficient — a reader without `mcp-app-admin`
+loaded should be able to operate the deployment from the README
+alone. See "What the app's docs must cover — the six user
+journeys" later in this skill for what that section needs to
+contain. The rule against inline duplication applies to *this
+skill*, not to the app's README.
 
 ## Gitignore
 

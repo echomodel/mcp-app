@@ -7,16 +7,40 @@ description: "Operate and manage deployed MCP apps or solutions that use the mcp
 
 ## Overview
 
-This skill covers operating mcp-app solutions after deployment:
-connecting the admin CLI, verifying the deployment end-to-end,
-managing users and credentials, and registering MCP clients. It
-applies regardless of how the solution was deployed — Cloud Run,
-Docker, bare metal, or any other environment.
+This skill covers **operating** mcp-app solutions — connecting
+the admin CLI, verifying a deployment end-to-end, managing users
+and credentials, and registering MCP clients. It applies
+regardless of how the solution was deployed — Cloud Run, Docker,
+bare metal, k8s, or any other environment.
 
-The `author-mcp-app` skill covers building, structuring, testing,
-and deploying solutions. This skill picks up where deployment ends.
-The hand-off point is: the app is deployed and running, the
-operator needs to connect, verify, and manage it.
+This skill is the third stage of the mcp-app solution lifecycle:
+
+1. **Author** — code, structure, local validation. Owned by
+   `author-mcp-app`.
+2. **Deploy** — turn a validated working tree into a reachable
+   URL that passes a minimal health check. **Owned by neither
+   mcp-app skill** — the operator's environment supplies the
+   route (a deployment skill, plugin, script, or context).
+3. **Operate** — this skill. Assumes a known URL that has
+   already passed `GET /health` → `{"status": "ok"}`.
+
+This skill does NOT deploy. It does NOT discover deployments. It
+does NOT decide where the URL came from. If the operator does not
+yet have a healthy URL to point at, that is a stage-2 problem —
+either the operator's agent environment provides a deployment
+route, or the operator handles deploy out-of-band — and this
+skill waits.
+
+**Verification of a freshly deployed instance is non-optional.**
+Whenever this skill is invoked immediately after a deploy (or
+whenever the operator suspects the running instance has changed),
+the verification ladder in Step 3 is mandatory before declaring
+the deploy successful. `GET /health` returning `ok` is necessary
+but **not sufficient** — `probe` and (when the solution declares
+one) `safe-tool --invoke` are the actual contracts the operator
+relies on. Skipping past them with raw `curl` or cloud CLI
+inspection is the wrong move; this skill is the route, not a
+fallback.
 
 ## Where this skill fits — user journey map
 
@@ -39,9 +63,13 @@ journeys 4–6:
   URL-form commands.
 
 Journeys 1–3 (install, run locally, deploy) are outside this
-skill's scope — refer the user or agent to the app's own
-README, the `author-mcp-app` skill, or their deployment tool's
-skill as appropriate.
+skill's scope. Install and local-run live with the app's own
+README and (for agents) `author-mcp-app`. Deploy lives with the
+operator's own deployment tooling — a deployment skill or plugin,
+in-repo scripts, or operator/user-level context describing how
+this operator deploys mcp-app solutions. This skill assumes a
+healthy URL produced by some stage-2 path; it does not produce
+one.
 
 ### Audiences
 
@@ -207,6 +235,53 @@ become invalid):
 ```bash
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```
+
+### When credential retrieval is sandbox-denied (agents)
+
+An agent operating in a sandboxed environment may find that the
+plaintext signing-key fetch — whether via an MCP tool that
+returns the secret value, a `gcloud secrets versions access`
+call, or any other direct retrieval — is denied by the
+environment's permission policy. This is intentional: pulling a
+live production credential into an agent's transcript context
+needs explicit per-action authorization.
+
+**When this happens, do not downgrade verification.** A common
+failure mode is to skip `connect`, skip `probe`, skip `safe-tool
+--invoke`, and substitute `curl /health` plus cloud-CLI
+inspection of the running revision. That is not equivalent — it
+verifies the process is alive but not that the deployment serves
+tools end-to-end, and it leaves the actual operator workflow
+(connect, probe, manage users, register clients) un-exercised.
+
+**Use the user-executed pattern instead.** Ask the user to run
+the connect command themselves so the secret never enters the
+agent's context. The exact mechanism depends on the agent
+platform — most platforms expose some way for the user to run a
+shell command in-session whose output stays out of the agent's
+transcript (for example, a `!`-prefix in some interactive
+agents). When that's available, ask the user to run something
+like:
+
+```
+my-solution-admin connect <url> --signing-key "$(<retrieval cmd>)"
+```
+
+…where `<retrieval cmd>` is the appropriate `gcloud secrets
+versions access ...`, `aws secretsmanager get-secret-value ...`,
+deployment-tool secret-get command, or `terraform output -raw
+...` for the operator's environment. After the user runs that,
+the per-app `connect` config persists the URL and key for this
+session and future ones; the agent can then proceed with `probe`
+and the rest of Step 3 normally without ever having seen the
+key.
+
+If the agent's platform offers no in-session shell execution,
+ask the user to run the equivalent command in their own terminal
+and confirm when `connect` has succeeded. Then continue.
+
+The point: a permission denial is a routing signal, not a signal
+to substitute a weaker verification path.
 
 ## Step 2: Connect the Admin CLI
 
