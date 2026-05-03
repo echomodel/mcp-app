@@ -299,14 +299,24 @@ old code.
 |-------------|------|
 | Bug fix, internal cleanup | patch (0.3.0 → 0.3.1) |
 | New endpoint, new CLI command, new framework feature | minor (0.3.0 → 0.4.0) |
-| Removed/renamed admin endpoint, change to `App` constructor signature, change to admin REST contract, breaking change in `mcp_app.testing` | major (0.3.0 → 1.0.0) |
+| Breaking change (renamed admin endpoint, `App` constructor signature change, admin REST contract change, breaking change in `mcp_app.testing`) | **on a 0.x release line, default to minor; never bump to a new major (X.0.0) without explicit author approval in the conversation that's making the change** |
 
 Documentation-only changes don't need a bump.
 
+While the framework is on a `0.x` release line, breaking changes
+land as minor bumps by default — the `0.x` prefix already
+signals "API is unstable; expect breaks." A jump to `1.0.0` (or
+any future `X.0.0`) is a product-level stability statement
+reserved for the author. Agents and contributors must surface
+breaking changes explicitly and ask which version slot the
+author wants; they must not pick `1.0.0` (or any new major) on
+their own, even when "rules say breaking → major" reads as
+mechanical.
+
 The conformance suite (`mcp_app.testing`) is part of the public
 contract — implementing apps import its modules in their
-framework tests. Any change that breaks an existing import or
-test name is a major bump.
+framework tests. Breaking changes there follow the same rule:
+minor on `0.x`, never a major bump without explicit approval.
 
 ### Catch-up bumps
 
