@@ -157,6 +157,12 @@ class _StubAdapter:
                                                      "result": {"content": [{"type": "text", "text": "ok"}]}}},
         }
 
+    async def aclose(self):
+        # Stub mirrors RemoteAuthAdapter.aclose() so the CLI's
+        # single-loop close pattern (added to dodge Python 3.14 strict
+        # asyncio teardown) works against the stub too.
+        pass
+
 
 def _stub(tools=None, call_response=None):
     adapter = _StubAdapter(tools=tools, call_response=call_response)
@@ -325,6 +331,10 @@ class _NoUsersAdapter:
             "supported": True,
             "tool": {"name": "ping", "description": "ok", "arguments": {}},
         }
+
+    async def aclose(self):
+        # See _StubAdapter.aclose for rationale.
+        pass
 
 
 def _no_users_stub():

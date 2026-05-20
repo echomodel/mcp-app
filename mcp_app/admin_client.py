@@ -34,6 +34,19 @@ class RemoteAuthAdapter:
         self.signing_key = signing_key
         self._http = http_client or httpx.AsyncClient()
 
+    async def aclose(self) -> None:
+        """Close the underlying httpx client.
+
+        The adapter owns a persistent ``httpx.AsyncClient`` so it can
+        amortize connection pool setup across multiple requests in the
+        same event loop. CLI callers that wrap each verb in its own
+        ``asyncio.run`` must call ``aclose`` before the loop exits —
+        otherwise the client's pool ends up referencing a closed loop
+        and Python 3.14's stricter asyncio raises
+        ``RuntimeError: Event loop is closed`` on the next request.
+        """
+        await self._http.aclose()
+
     def _admin_token(self) -> str:
         now = datetime.now(timezone.utc)
         payload = {

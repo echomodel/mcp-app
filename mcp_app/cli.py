@@ -109,6 +109,22 @@ def _connect_handler(target: str, signing_key: str | None, app_name: str | None)
         _save_setup(data, app_name=app_name)
         label = app_name or "mcp-app"
         click.echo(f"Configured {label}: {target}")
+        _print_endpoints(target)
+
+
+def _print_endpoints(base_url: str):
+    """Print the mcp-app URL routing for a deployment.
+
+    Every mcp-app deployment exposes the same three paths under its
+    base URL. Surfaced from `connect` / `probe` / `tools …` output
+    so operators see what each path does without having to read the
+    framework source.
+    """
+    base = base_url.rstrip("/")
+    click.echo("  Endpoints:")
+    click.echo(f"    MCP     {base}/           JSON-RPC, JWT")
+    click.echo(f"    Admin   {base}/admin/*    admin REST, admin-JWT")
+    click.echo(f"    Health  {base}/health     unauthenticated")
 
 
 def _print_request(invocation: dict):
@@ -264,6 +280,7 @@ def _render_tool_show(tool: dict, app_name_hint: str) -> None:
 def _print_probe(result: dict):
     """Render probe result as human-readable text."""
     click.echo(f"URL: {result['url']}")
+    _print_endpoints(result["url"])
     health = result.get("health", {})
     click.echo(f"Health: {health.get('status', 'unknown')}")
 
@@ -601,9 +618,22 @@ def _tools_list_command(as_json, user, app_name: str | None):
 
 
 def _tools_show_command(name, as_json, user, app_name: str | None):
-    """Shared body for `tools show <name>`."""
+    """Shared body for `tools show <name>`.
+
+    Single asyncio.run cycle + explicit client close so the
+    httpx.AsyncClient's connection pool doesn't outlive its event
+    loop (Python 3.14 strict-asyncio compatibility — see
+    `_tools_call_command` for the broader rationale).
+    """
     adapter = _require_remote_adapter(app_name)
-    tools, _ = _run_probe(adapter.list_tools(user_email=user))
+
+    async def _do_show():
+        try:
+            return await adapter.list_tools(user_email=user)
+        finally:
+            await adapter.aclose()
+
+    tools, _ = _run_probe(_do_show())
     matches = [t for t in tools if t["name"] == name]
     if not matches:
         cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
@@ -619,26 +649,45 @@ def _tools_show_command(name, as_json, user, app_name: str | None):
 
 
 def _tools_call_command(name, arg_pairs, json_body, as_json, user, app_name: str | None):
-    """Shared body for `tools call <name>`."""
+    """Shared body for `tools call <name>`.
+
+    Runs schema-lookup (list_tools) AND the tools/call invocation inside
+    a single ``asyncio.run`` cycle. The adapter's httpx.AsyncClient is
+    bound to whichever event loop first uses it; running the two calls
+    in separate ``asyncio.run`` cycles (as the previous structure did)
+    left the client's connection pool referencing a closed loop on the
+    second call, causing ``RuntimeError: Event loop is closed`` on
+    Python 3.14. The single-loop structure also closes the client
+    explicitly via ``adapter._http.aclose()`` before the loop exits,
+    so no scheduled callbacks fire after teardown.
+    """
     adapter = _require_remote_adapter(app_name)
 
-    if json_body:
-        arguments = _parse_json_arg(json_body)
-        if not isinstance(arguments, dict):
-            raise click.ClickException(
-                "--json must be a JSON object (not array/scalar)."
-            )
-    else:
-        tools, _ = _run_probe(adapter.list_tools(user_email=user))
-        matches = [t for t in tools if t["name"] == name]
-        if not matches:
-            cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
-            raise click.ClickException(
-                f"Unknown tool: {name}. Run `{cmd_hint} tools list` to see all tools."
-            )
-        arguments = _parse_args_pairs(arg_pairs, matches[0].get("inputSchema"))
+    async def _do_call():
+        try:
+            if json_body:
+                arguments = _parse_json_arg(json_body)
+                if not isinstance(arguments, dict):
+                    raise click.ClickException(
+                        "--json must be a JSON object (not array/scalar)."
+                    )
+            else:
+                tools, _ = await adapter.list_tools(user_email=user)
+                matches = [t for t in tools if t["name"] == name]
+                if not matches:
+                    cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
+                    raise click.ClickException(
+                        f"Unknown tool: {name}. Run "
+                        f"`{cmd_hint} tools list` to see all tools."
+                    )
+                arguments = _parse_args_pairs(
+                    arg_pairs, matches[0].get("inputSchema")
+                )
+            return await adapter.call_tool(name, arguments, user_email=user)
+        finally:
+            await adapter.aclose()
 
-    result = _run_probe(adapter.call_tool(name, arguments, user_email=user))
+    result = _run_probe(_do_call())
     if as_json:
         click.echo(json.dumps(result, indent=2))
         return
