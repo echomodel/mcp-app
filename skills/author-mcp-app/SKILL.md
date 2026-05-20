@@ -1215,8 +1215,18 @@ pipx list 2>&1 | grep -A5 <package-name>
 ```
 
 The output for a correct install includes the literal
-`(editable)` marker on the package line. If the marker is
-absent, the install is a snapshot — fix it before continuing:
+`(editable)` marker on the package line.
+
+**Before any agent-driven smoke test (`claude mcp add`,
+`claude -p`, or the equivalent), run this check on the install
+the agent CLI resolves to** — typically `~/.local/bin/<name>-mcp`,
+the pipx binary. A `.venv` editable install on the side doesn't
+satisfy this: the agent CLI walks `$PATH` and hits the pipx
+binary first, so a stale pipx snapshot silently invalidates the
+test even if your venv has the right source.
+
+Absence of the `(editable)` marker is a stop-the-world block
+for that smoke test. Fix it before proceeding:
 
 ```bash
 pipx install -e . --force
@@ -1360,15 +1370,22 @@ round-tripped successfully.
 
 **Reading the result:**
 
-- Tool returns data → registration and the full SDK code path
+- Tool returns real data from the upstream API → smoke test
+  passed: registration, transport, and the full SDK code path
   work end-to-end.
-- Tool returns an **error envelope** (e.g. "no access token
-  configured for your profile") → the transport works; only the
-  app-level state (user record, credentials) is incomplete.
-  That's still a passing transport check.
+- Tool returns an error message (e.g. "no access token
+  configured for your profile") → smoke test did NOT pass. The
+  transport may be fine, but the smoke test isn't complete until
+  real data round-trips. Configure a user/account and re-run.
+  If no user is configured, register one (run the app's setup
+  flow); the smoke test is not "done" until real data flows.
 - `claude -p` errors before any tool call (server failed to
   start, command not found, args rejected) → registration is
   broken. Fix before moving on.
+
+A smoke test is a happy-path proof. Error messages belong in
+negative tests where the failure IS the assertion — not in the
+smoke test's pass criteria.
 
 This recipe also works for verifying any *deployed* instance —
 register HTTP transport instead and run the same `claude -p`
