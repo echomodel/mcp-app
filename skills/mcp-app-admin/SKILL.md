@@ -197,9 +197,11 @@ my-solution-admin connect <url> --signing-key "$(retrieve-it-somehow)"
 solution was deployed and how `SIGNING_KEY` was configured:
 
 - **gapp** with a generated secret — retrieve from GCP Secret
-  Manager using the secret name from gapp config:
+  Manager using the secret name from gapp config. Run from
+  inside the solution's repo directory (gapp resolves the
+  solution from the working directory):
   ```bash
-  gapp secrets get <secret-name> --raw
+  cd <solution-repo> && gapp secrets get <secret-name> --plaintext
   ```
 
 - **Cloud secret manager** (GCP, AWS, etc.) — the key was
