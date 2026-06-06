@@ -210,6 +210,7 @@ Legend for the per-artifact columns:
 | MCP client configuration (stdio + HTTP examples) | README | Full | Pointer | Referenced |
 | `register` command output handling | README | Full | Full (auth-side) | Full (ops-side) |
 | Architecture (FastMCP+Starlette wrap, ASGI) | README | Full | Pointer | — |
+| Extra routes / custom data plane (`App.extra_routes`) | README | Full | Summary | — |
 | Free tests / conformance suite (how to adopt) | README | Full | Full | — |
 | Conformance suite internals (how it's built) | CONTRIBUTING | — | — | — |
 | Architectural decisions and rationale | CONTRIBUTING | — | — | — |

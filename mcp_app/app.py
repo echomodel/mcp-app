@@ -22,7 +22,7 @@ import click
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
+from starlette.routing import BaseRoute, Mount, Route
 
 from mcp_app.admin import create_admin_app
 from mcp_app.bridge import DataStoreAuthAdapter
@@ -150,6 +150,21 @@ class App:
         profile_expand: If True, admin CLI generates individual flags
             from profile model fields. If False, accepts --profile
             as JSON or @file.
+        extra_routes: Optional list of Starlette routing objects
+            (``Route`` / ``Mount``) the app contributes to the HTTP
+            stack. They are mounted **before** the MCP catch-all at
+            ``/`` (so they take precedence) and **after** ``/health``
+            and ``/admin``. The framework does NOT wrap them in JWT
+            identity middleware — each route owns its own auth, exactly
+            like the public ``/health`` route. Use this for an
+            out-of-band data plane: streaming endpoints for payloads
+            too large to return inline in an MCP tool response, where
+            the route authorizes itself (e.g. a signed-URL scheme) so
+            no agent-held credential is required. Default ``None`` —
+            apps that don't need custom routes pass nothing and get the
+            standard three-route stack unchanged. stdio mode has no
+            ASGI layer, so ``extra_routes`` applies to HTTP serving
+            only.
     """
 
     name: str
@@ -161,6 +176,7 @@ class App:
     profile_model: type | None = None
     profile_expand: bool = True
     safe_tool: SafeTool | None = None
+    extra_routes: list[BaseRoute] | None = None
 
     def __post_init__(self):
         self._asgi = None
@@ -253,14 +269,20 @@ class App:
             body, code = build_health_response()
             return JSONResponse(body, status_code=code)
 
-        return Starlette(
-            routes=[
-                Route("/health", health),
-                Mount("/admin", app=admin_app),
-                Mount("/", app=wrapped),
-            ],
-            lifespan=lifespan,
-        )
+        # Route order matters: /health and /admin first, then any
+        # app-contributed extra routes, then the MCP catch-all at "/".
+        # The "/" mount matches everything, so extra_routes must precede
+        # it to take effect. extra_routes are mounted un-wrapped — each
+        # owns its own auth (see the App.extra_routes docstring).
+        routes: list[BaseRoute] = [
+            Route("/health", health),
+            Mount("/admin", app=admin_app),
+        ]
+        if self.extra_routes:
+            routes.extend(self.extra_routes)
+        routes.append(Mount("/", app=wrapped))
+
+        return Starlette(routes=routes, lifespan=lifespan)
 
     async def __call__(self, scope, receive, send):
         """ASGI entry point.

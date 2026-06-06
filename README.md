@@ -150,6 +150,63 @@ JWTs, loads the full user record from the store, and sets the
 See [docs/custom-middleware.md](docs/custom-middleware.md) for
 advanced middleware configuration.
 
+### Extra routes (custom data plane)
+
+MCP tool responses are the wrong place for large binary payloads —
+clients cap how much a single tool result can carry, and under HTTP
+transport the agent and server don't share a filesystem, so a
+server-local path is unreachable. When an app needs to move bytes
+larger than an inline tool response allows, it contributes its own
+HTTP routes via `extra_routes` and lets agents transfer the bytes
+out-of-band of the MCP response:
+
+```python
+# my_app/__init__.py
+from starlette.responses import StreamingResponse
+from starlette.routing import Route
+from mcp_app import App
+from my_app.mcp import tools
+from my_app.sdk.core import MySDK
+
+sdk = MySDK()
+
+async def download(request):
+    # The app owns this route's auth. A common pattern is a
+    # self-authorizing signed URL: an MCP tool mints a short-lived
+    # URL signed with SIGNING_KEY, the agent fetches it with a plain
+    # GET, and this handler verifies the signature before streaming.
+    file_id = request.path_params["file_id"]
+    sdk.verify_signed_url(request.url)          # 403 on bad/expired sig
+    return StreamingResponse(sdk.stream(file_id))
+
+app = App(
+    name="my-app",
+    tools_module=tools,
+    extra_routes=[Route("/files/{file_id}", download)],
+)
+```
+
+How it behaves:
+
+- Routes are mounted **after** `/health` and `/admin` and **before**
+  the MCP catch-all at `/`, so they take precedence over MCP but
+  cannot shadow the framework's own endpoints.
+- The framework does **not** wrap them in JWT identity middleware —
+  each route owns its auth, exactly like the public `/health` route.
+  This is deliberate: an out-of-band data plane is typically reached
+  by a fetch that carries no agent JWT, so the URL itself must be the
+  credential (e.g. a signed-URL scheme verified in the handler).
+- `extra_routes` defaults to `None`. Apps that don't need it pass
+  nothing and get the standard three-route stack unchanged — no new
+  imports, no behavior change. (Starlette is already a dependency of
+  every mcp-app app; using `extra_routes` just means importing the
+  `Route`/`Mount`/response types you already build with.)
+- stdio mode has no ASGI layer, so `extra_routes` applies to HTTP
+  serving only.
+
+Keep handlers thin (SDK-first): signature verification, streaming,
+and any chunking belong in the SDK, not the route handler.
+
 ### Two App Patterns
 
 Both data-owning and API-proxy apps use the same framework. The difference is what the SDK reads from the user context.

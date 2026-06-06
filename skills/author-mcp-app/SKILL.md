@@ -935,6 +935,73 @@ worth it for the solution's risk profile, leave `safe_tool`
 unset and rely on `probe`. The framework treats this as a
 normal, supported configuration. The choice is the author's.
 
+### Extra HTTP routes — an out-of-band data plane
+
+MCP tool responses cannot carry large binary payloads: clients
+cap how much a single tool result holds, and under HTTP transport
+the agent and server don't share a filesystem, so a server-local
+path is unreachable from the agent. When an app must move bytes
+bigger than an inline tool response allows (large file
+upload/download, generated reports, media), it contributes its own
+HTTP routes via the `App.extra_routes` field and the bytes travel
+out-of-band of the MCP response.
+
+```python
+# my_solution/__init__.py
+from starlette.responses import StreamingResponse
+from starlette.routing import Route
+from mcp_app import App
+from my_solution.mcp import tools
+from my_solution.sdk.core import MySDK
+
+sdk = MySDK()
+
+async def download(request):
+    sdk.verify_signed_url(request.url)        # 403 on bad/expired signature
+    return StreamingResponse(sdk.stream(request.path_params["file_id"]))
+
+app = App(
+    name="my-solution",
+    tools_module=tools,
+    extra_routes=[Route("/files/{file_id}", download)],
+)
+```
+
+Rules:
+
+- **The framework does not authenticate these routes.** Unlike the
+  MCP endpoint and `/admin` (JWT-gated), `extra_routes` are mounted
+  un-wrapped — each route owns its own auth, like the public
+  `/health` route. This is deliberate: an out-of-band fetch usually
+  carries no agent JWT (the JWT lives in the MCP client's transport
+  config, not in the agent's hands), so the URL itself must be the
+  credential. The canonical pattern is a **self-authorizing signed
+  URL**: an MCP tool mints a short-lived URL signed with the
+  deployment's `SIGNING_KEY` (read from the env, same key the
+  framework uses for JWTs), the agent fetches it with a plain
+  `curl`/GET, and the route handler verifies the signature before
+  streaming. No agent-held credential, bounded blast radius.
+- **Routing precedence:** routes mount after `/health` and `/admin`,
+  before the MCP catch-all at `/`. They take precedence over MCP but
+  cannot shadow the framework's own endpoints.
+- **Thin handlers (SDK-first):** signature verification, streaming,
+  and chunking live in the SDK. The route handler parses the
+  request, calls the SDK, and returns a response.
+- **Zero cost when unused:** `extra_routes` defaults to `None`. Apps
+  that don't need it pass nothing and get the standard three-route
+  stack with no new imports and no behavior change. Starlette is
+  already a transitive dependency of every mcp-app app, so using
+  `extra_routes` only means importing the `Route`/`Mount`/response
+  types you build the routes with.
+- **HTTP only:** stdio mode has no ASGI layer, so `extra_routes`
+  applies to HTTP serving. A CLI on the same machine reads local
+  files directly and doesn't need the data plane.
+
+Keep the inline path too — small payloads (and tool-only MCP
+clients that can't perform an out-of-band fetch) still use an
+inline content block / base64 argument. The data-plane routes are
+the large-payload path, not a replacement for inline.
+
 ### With FastMCP (alternative)
 
 ```python
