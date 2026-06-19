@@ -181,6 +181,7 @@ Legend for the per-artifact columns:
 | Quick start (minimal app) | README | Full | Full | — |
 | Two app patterns (data-owning vs API-proxy) | README | Full | Full | Implicit |
 | Tool discovery rules | README | Full | Full | — |
+| Transport-scoped tools (`@mcp_transport`) + host-path/file-upload safety | README | Full | Full | — |
 | Environment variables (canonical table) | README | Full | Full | Referenced |
 | Data storage (path resolution + storage contract) | README | Full | Summary | Referenced |
 | Startup `data_dir` log line + fields | README | Full | Summary | Referenced |
@@ -687,6 +688,43 @@ on the grounds that "we can't enforce it anyway." A reported fact
 in the log is what lets an operator (or a log-scraping monitor) build
 their own policy on top, even when the framework deliberately ships
 no policy of its own.
+
+### Transport-scoped tools — host-path inputs stay off HTTP
+
+`@mcp_transport(...)` restricts a tool to specific transports; the
+registration loops filter by it (`_discover_tools(modules, transport)`),
+so a restricted tool is never registered — nor advertised — on the other
+transport. The active transport is also reported as a fact (`is_stdio()` /
+`get_transport()`, set at startup in `serve()`/`stdio()` next to `_store`).
+
+This follows the same report-fact / opt-in-enforce split as
+`REQUIRED_FS_TYPE`: the framework *reports* the transport and *honors* the
+author's `@mcp_transport` declaration, but does not itself infer which tool
+inputs are sensitive. It can't — a `str` arg could be a host path, a record
+ID, or free text; only the author knows intent.
+
+The motivating threat: a tool that reads a file path the **caller** supplies
+is safe over stdio (the process runs as the local user) but is an
+**arbitrary server-side file read over HTTP**, where the server is
+multi-tenant. With the public source and a known data-volume layout, a caller
+names `/proc/self/environ` (the signing key lives in the process env) or
+another user's data file, the server reads it, and it's exfiltrated via a
+record the caller controls — cross-tenant secret disclosure and auth bypass.
+
+Why this shape and not the alternatives:
+
+- **Not a Cloud-Run env check (`K_SERVICE`).** Cloud-specific; *fails open*
+  on every other host. The transport is the portable, fail-closed signal.
+- **Not arg-stripping by default.** Removing one arg from a tool per transport
+  yields a function whose advertised schema and implementation diverge, and
+  breaks if the arg is load-bearing. Restricting whole tools (and modelling
+  "attach a file" as a bytes/URL tool + a stdio-only host-path tool) keeps
+  every registered tool internally coherent.
+- **Not framework-enforced auto-blocking.** Consistent with "reports facts,
+  does not enforce policy": the framework supplies the mechanism; the
+  `author-mcp-app` skill makes following it mandatory for file tools, and the
+  default (deny over HTTP unless the author opts a host-path tool into stdio)
+  is fail-closed.
 
 ### stdio identity comes from --user, not yaml
 

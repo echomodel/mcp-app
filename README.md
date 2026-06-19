@@ -251,6 +251,49 @@ The SDK reads `current_user.get().profile` for whatever it needs. The profile wa
 
 The `tools` module is imported and all public async functions (not starting with `_`) are registered as MCP tools. Function names become tool names. Docstrings become descriptions. Type hints become schemas.
 
+### Transport-scoped tools (`@mcp_transport`)
+
+By default a tool is registered on **both** transports. To restrict one,
+annotate it:
+
+```python
+from mcp_app import mcp_transport
+
+@mcp_transport("stdio")          # registered ONLY over stdio
+async def attach_local_file(transaction_id: str, path: str) -> dict:
+    """Attach a file the local user names by path."""
+    ...
+```
+
+A transport-restricted tool is **never registered on the other transport** —
+it isn't advertised to those clients at all (no misleading schema entry, no
+runtime rejection). `@mcp_transport("http")` is also supported.
+
+**Why this exists — host paths and HTTP.** A tool that reads a file path the
+*caller* names is safe over **stdio** (the process runs as the local user, so
+reading their own files is no escalation) but is an **arbitrary server-file
+read over HTTP**, where the server is reachable by untrusted callers and holds
+other users' data and process secrets (`/proc/self/environ`, the user-data
+volume). **A deployed (HTTP) MCP tool must never read a server-side path from
+client input.** Accept the bytes (`content_base64`) or hand back an
+out-of-band upload URL the client PUTs to; keep host-path reads in a separate
+tool annotated `@mcp_transport("stdio")` (or in the CLI). Model "attach a
+file" as two tools: a bytes/URL tool (all transports) + a host-path tool
+(stdio only).
+
+The active transport is also exposed as a fact for finer-grained checks:
+
+```python
+from mcp_app import is_stdio, get_transport
+
+is_stdio()        # True only over stdio; False over HTTP and before startup (fail-closed)
+get_transport()   # "stdio" | "http" | None
+```
+
+The framework **reports** the transport and **honors** `@mcp_transport` at
+registration; it does not otherwise infer which inputs are sensitive — that
+declaration is the tool author's (see the [author-mcp-app skill](skills/author-mcp-app/SKILL.md)).
+
 ## Environment Variables
 
 | Variable | Required | If Missing | Purpose |

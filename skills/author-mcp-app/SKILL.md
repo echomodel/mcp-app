@@ -551,6 +551,12 @@ while building an app against it), the workflow is symmetric:
 - [ ] Identity middleware runs by default (no config needed)
 - [ ] Tool docstrings are clear and user-centric (also surface in
       `tools show <name>` for operators)
+- [ ] **No tool reads a caller-named host path over HTTP.** Any tool that
+      reads a file path supplied by the caller is `@mcp_transport("stdio")`
+      (or the capability is CLI-only); the HTTP path takes bytes
+      (`content_base64`) or an out-of-band upload URL. (See "File uploads &
+      host-path inputs" below — this is an arbitrary-server-file-read /
+      cross-tenant-secret-exfiltration risk if exposed over HTTP.)
 - [ ] Considered declaring a `SafeTool` for end-to-end smoke testing,
       or made a deliberate decision to opt out
 
@@ -778,6 +784,50 @@ with `_` are skipped.
 module becomes a tool — including SDK functions. Always use a
 class-based SDK so tools call `sdk.method()` and SDK methods
 stay hidden from discovery.
+
+**File uploads & host-path inputs (MANDATORY for any file tool).**
+A tool that reads a file path the *caller* supplies is safe over **stdio**
+— the process runs as the local user, so reading their own files is no
+privilege escalation — but is an **arbitrary server-side file read over
+HTTP**, where the deployed server is multi-tenant and reachable by untrusted
+callers. With the public source + a known data-volume layout, a caller can
+name `/proc/self/environ` (process env, including the signing key) or another
+user's data file, have the server read it, and exfiltrate it (e.g. by
+attaching it to a record they control). That is **cross-tenant secret
+disclosure / full auth bypass.**
+
+Rules for any tool that ingests a file:
+
+- **The HTTP surface never reads a server-side path from client input.**
+  Accept the file as **bytes** (`content_base64`) for small payloads, or
+  hand back an **out-of-band upload URL** the client PUTs to for large ones.
+- **Host-path convenience is stdio-only.** If you want a "read this local
+  path" affordance, put it in a **separate** tool annotated
+  `@mcp_transport("stdio")` (the framework then never registers it on the
+  HTTP server), or keep it in the CLI/provider layer, which runs as the OS
+  user.
+- **Model "attach a file" as two tools**, not one with a `path` arg over HTTP:
+
+  ```python
+  from mcp_app import mcp_transport
+
+  async def attach_file(record_id: str, content_base64: str) -> dict:
+      """Attach a file (base64 bytes). Safe on every transport."""
+      ...
+
+  @mcp_transport("stdio")
+  async def attach_local_file(record_id: str, path: str) -> dict:
+      """Attach a file by local path — stdio only (runs as the local user)."""
+      ...
+  ```
+
+- **Do not gate by a Cloud-specific env var** (e.g. `K_SERVICE`): it's
+  Cloud-Run-only and *fails open* on other hosts. Use `@mcp_transport`, or
+  `from mcp_app import is_stdio` for a runtime check (fail-closed: false over
+  HTTP and before startup).
+
+The framework reports the transport and honors `@mcp_transport`; it does not
+infer which inputs are sensitive — declaring that is your job as the author.
 
 **SDK has state** (config, file paths, store) — instantiate:
 ```python

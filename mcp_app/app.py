@@ -86,12 +86,17 @@ def _resolve_class(value: str, aliases: dict):
     return getattr(importlib.import_module(module_path), class_name)
 
 
-def _discover_tools(modules: list[ModuleType]) -> list:
+def _discover_tools(modules: list[ModuleType], transport: str | None = None) -> list:
     """Discover public async functions across one or more modules.
 
     Deduplicates by function identity, so a function re-exported from a
     package ``__init__`` and also reachable via a submodule passed
     separately won't register twice.
+
+    ``transport`` filters by the ``@mcp_transport`` annotation: when given
+    ("stdio" or "http"), a tool restricted to other transports is skipped, so
+    it is never registered (nor advertised) on that transport. ``None`` (the
+    default) applies no filter and returns every tool.
     """
     seen = set()
     out = []
@@ -100,6 +105,8 @@ def _discover_tools(modules: list[ModuleType]) -> list:
             if inspect.iscoroutinefunction(obj) and not name.startswith("_"):
                 if obj not in seen:
                     seen.add(obj)
+                    if transport is not None and transport not in _tool_transports(obj):
+                        continue
                     out.append(obj)
     return out
 
@@ -120,6 +127,54 @@ def _require_identity(func):
             )
         return await func(*args, **kwargs)
     return wrapper
+
+
+VALID_TRANSPORTS = frozenset({"stdio", "http"})
+
+
+def mcp_transport(*transports: str):
+    """Restrict a tool to specific transports. Unannotated tools run on ALL
+    transports (the default).
+
+    This is the framework mechanism for keeping a capability OFF the
+    multi-tenant HTTP surface. A tool that reads a host file path the caller
+    names is safe over **stdio** — the process runs as the local user, so
+    reading their own files is no privilege escalation — but is an
+    arbitrary-server-file read over **HTTP**, where the server is reachable
+    by untrusted callers and holds other users' data and process secrets.
+
+    Annotate such a tool ``@mcp_transport("stdio")`` and the framework simply
+    never registers it on the HTTP server: it isn't advertised to remote
+    clients at all (no misleading schema, no runtime rejection). Model a
+    capability that must exist on both — e.g. "attach a file" — as TWO tools:
+    a bytes/`content_base64` (or out-of-band-URL) tool with no annotation
+    (all transports), plus a host-path tool annotated ``@mcp_transport("stdio")``.
+
+        @mcp_transport("stdio")
+        async def attach_local_file(transaction_id: str, path: str) -> dict:
+            ...
+
+    Restricting to HTTP only is also supported (``@mcp_transport("http")``)
+    for tools that are meaningless without the served stack.
+    """
+    chosen = frozenset(t.lower() for t in transports)
+    invalid = chosen - VALID_TRANSPORTS
+    if not chosen or invalid:
+        raise ValueError(
+            f"mcp_transport expects one or more of {sorted(VALID_TRANSPORTS)}; "
+            f"got {list(transports)!r}"
+        )
+
+    def decorator(func):
+        func._mcp_transports = chosen
+        return func
+
+    return decorator
+
+
+def _tool_transports(func) -> frozenset:
+    """Transports a discovered tool is allowed on (default: all)."""
+    return getattr(func, "_mcp_transports", VALID_TRANSPORTS)
 
 
 @dataclass
@@ -231,6 +286,7 @@ class App:
 
         store = self._build_store()
         mcp_app._store = store
+        mcp_app._transport = "http"
 
         self._mcp = FastMCP(
             self.name,
@@ -239,7 +295,7 @@ class App:
             streamable_http_path="/",
         )
         self._mcp.settings.transport_security.enable_dns_rebinding_protection = False
-        for func in _discover_tools(self._discovered_modules):
+        for func in _discover_tools(self._discovered_modules, "http"):
             self._mcp.tool()(_require_identity(func))
 
         auth_store = DataStoreAuthAdapter(store)
@@ -304,9 +360,10 @@ class App:
 
         store = self._build_store()
         mcp_app._store = store
+        mcp_app._transport = "stdio"
 
         mcp = FastMCP(self.name)
-        for func in _discover_tools(self._discovered_modules):
+        for func in _discover_tools(self._discovered_modules, "stdio"):
             mcp.tool()(_require_identity(func))
 
         adapter = DataStoreAuthAdapter(store)
