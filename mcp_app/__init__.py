@@ -1,12 +1,13 @@
 """mcp-app: Config-driven MCP application framework."""
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 from mcp_app.app import App, SafeTool, mcp_transport
 from mcp_app.context import current_user, register_profile
 from mcp_app.data_store import UserDataStore, FileSystemUserDataStore
 from mcp_app.models import UserAuthRecord, UserRecord
 from mcp_app.store import UserAuthStore
+from mcp_app.cli import admin_store, admin_target
 
 # Set by CLI commands (stdio/serve) after building the app.
 # Tools access via: from mcp_app import get_store
@@ -54,4 +55,6 @@ __all__ = [
     "UserRecord",
     "UserAuthStore",
     "UserDataStore",
+    "admin_store",
+    "admin_target",
 ]

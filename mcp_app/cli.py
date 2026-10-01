@@ -89,10 +89,18 @@ def _run_probe(coro):
 def _connect_handler(target: str, signing_key: str | None, app_name: str | None):
     """Shared connect logic for both generic and per-app CLIs.
 
+    ``setup.json`` holds the active ``mode`` plus the saved remote
+    (``url``, ``signing_key``). Switching modes never discards the saved
+    remote: ``connect local`` changes only the mode, ``connect remote``
+    switches back to the saved remote, and ``connect <url>`` without
+    ``--signing-key`` reuses the saved key when the URL is unchanged.
+
     When app_name is None (generic CLI), 'local' is not supported
     because the generic CLI doesn't know which app's filesystem store
     to target. Per-app CLIs pass their app_name to enable local mode.
     """
+    label = app_name or "mcp-app"
+    saved = _load_setup(app_name)
     if target == "local":
         if app_name is None:
             raise click.ClickException(
@@ -100,16 +108,30 @@ def _connect_handler(target: str, signing_key: str | None, app_name: str | None)
                 "(e.g., my-app-admin connect local) because the "
                 "generic CLI doesn't know which app's store to use."
             )
-        _save_setup({"mode": "local"}, app_name=app_name)
+        _save_setup({**saved, "mode": "local"}, app_name=app_name)
         click.echo(f"Configured {app_name} for local access.")
-    else:
-        data = {"mode": "remote", "url": target}
-        if signing_key:
-            data["signing_key"] = signing_key
-        _save_setup(data, app_name=app_name)
-        label = app_name or "mcp-app"
-        click.echo(f"Configured {label}: {target}")
-        _print_endpoints(target)
+        if saved.get("url"):
+            click.echo(f"Saved remote kept: {saved['url']} (switch back with 'connect remote').")
+        return
+    if target == "remote":
+        if not saved.get("url"):
+            raise click.ClickException(
+                "No saved remote. Run 'connect <url> --signing-key <key>' first."
+            )
+        _save_setup({**saved, "mode": "remote"}, app_name=app_name)
+        click.echo(f"Configured {label}: {saved['url']}")
+        _print_endpoints(saved["url"])
+        return
+    url = target.rstrip("/")
+    data = {"mode": "remote", "url": url}
+    if signing_key:
+        data["signing_key"] = signing_key
+    elif saved.get("signing_key") and (saved.get("url") or "").rstrip("/") == url:
+        data["signing_key"] = saved["signing_key"]
+        click.echo("Reusing the saved signing key for this URL.")
+    _save_setup(data, app_name=app_name)
+    click.echo(f"Configured {label}: {url}")
+    _print_endpoints(url)
 
 
 def _print_endpoints(base_url: str):
@@ -362,6 +384,9 @@ def main():
 def connect(target, signing_key):
     """Configure connection to a deployed instance.
 
+    A URL without --signing-key reuses the saved key when the URL is
+    unchanged; 'remote' re-selects the saved connection.
+
     \b
     Examples:
       mcp-app connect https://my-app.run.app --signing-key xxx
@@ -524,8 +549,12 @@ def admin_tools():
 
 # --- App CLI factories ---
 
-def _get_auth_store(app_name: str):
-    """Get the auth store based on connect config — local or remote."""
+def admin_target(app_name: str) -> str:
+    """The admin target selected by ``<app>-admin connect``: "local" or "remote".
+
+    Raises ``click.ClickException`` with the connect commands when nothing
+    is configured.
+    """
     cfg = _load_setup(app_name)
     if not cfg:
         raise click.ClickException(
@@ -533,16 +562,27 @@ def _get_auth_store(app_name: str):
             f"  {app_name}-admin connect local\n"
             f"  {app_name}-admin connect <url> --signing-key xxx"
         )
-    if cfg.get("mode") == "local":
+    return "local" if cfg.get("mode") == "local" else "remote"
+
+
+def admin_store(app_name: str):
+    """The user store for the configured admin target.
+
+    Returns a ``UserAuthStore`` — the app's local filesystem store, or a
+    remote adapter for the connected deployment — so admin commands an app
+    adds with ``app.admin_cli.add_command(...)`` read and write the same
+    place as the built-in ``users`` commands. Close a remote adapter with
+    ``await store.aclose()`` when done.
+    """
+    if admin_target(app_name) == "local":
         from mcp_app.data_store import FileSystemUserDataStore
         from mcp_app.bridge import DataStoreAuthAdapter
         return DataStoreAuthAdapter(FileSystemUserDataStore(app_name=app_name))
-    else:
-        from mcp_app.admin_client import RemoteAuthAdapter
-        return RemoteAuthAdapter(
-            _resolve_url(None, app_name),
-            _resolve_signing_key(None, app_name),
-        )
+    from mcp_app.admin_client import RemoteAuthAdapter
+    return RemoteAuthAdapter(
+        _resolve_url(None, app_name),
+        _resolve_signing_key(None, app_name),
+    )
 
 
 def _require_remote_adapter(app_name: str | None):
@@ -812,12 +852,17 @@ def create_admin_cli(app_name: str) -> click.Group:
     @click.argument("target")
     @click.option("--signing-key", default=None)
     def connect(target, signing_key):
-        """Configure admin target. Use 'local' or a URL.
+        """Configure admin target: 'local', 'remote', or a URL.
+
+        The saved remote (URL and signing key) is kept when switching to
+        'local'; 'remote' switches back to it. A URL without --signing-key
+        reuses the saved key when the URL is unchanged.
 
         \b
         Examples:
-          connect local
           connect https://my-app.run.app --signing-key xxx
+          connect local
+          connect remote
         """
         _connect_handler(target, signing_key, app_name=app_name)
 
@@ -844,7 +889,7 @@ def create_admin_cli(app_name: str) -> click.Group:
     @users.command("list")
     def users_list():
         """List registered users."""
-        store = _get_auth_store(app_name)
+        store = admin_store(app_name)
         result = _run(store.list())
         if not result:
             click.echo("No users.")
@@ -887,7 +932,7 @@ def create_admin_cli(app_name: str) -> click.Group:
 
         email = kwargs.pop("email")
 
-        store = _get_auth_store(app_name)
+        store = admin_store(app_name)
         existing = _run(store.get(email))
         if existing:
             raise click.ClickException(
@@ -905,7 +950,7 @@ def create_admin_cli(app_name: str) -> click.Group:
             if profile:
                 profile = _validate_profile(profile)
 
-        store = _get_auth_store(app_name)
+        store = admin_store(app_name)
         result = _run(store.save(
             UserAuthRecord(email=email, created=datetime.now(timezone.utc)),
             profile=profile,
@@ -935,7 +980,7 @@ def create_admin_cli(app_name: str) -> click.Group:
         @click.argument("value")
         def users_update_profile(email, key, value):
             __doc__ = "\n".join(help_lines)
-            store = _get_auth_store(app_name)
+            store = admin_store(app_name)
             existing = _run(store.get_full(email))
             if not existing:
                 raise click.ClickException(f"User not found: {email}")
@@ -958,7 +1003,7 @@ def create_admin_cli(app_name: str) -> click.Group:
 
             DATA is a JSON string or @file with fields to merge.
             """
-            store = _get_auth_store(app_name)
+            store = admin_store(app_name)
             existing = _run(store.get_full(email))
             if not existing:
                 raise click.ClickException(f"User not found: {email}")
@@ -975,7 +1020,7 @@ def create_admin_cli(app_name: str) -> click.Group:
     @click.option("--json", "as_json", is_flag=True, help="JSON output.")
     def users_get_profile(email, as_json):
         """Read a user's profile."""
-        store = _get_auth_store(app_name)
+        store = admin_store(app_name)
         record = _run(store.get_full(email))
         if not record:
             raise click.ClickException(f"User not found: {email}")
@@ -1003,7 +1048,7 @@ def create_admin_cli(app_name: str) -> click.Group:
     @click.argument("email")
     def users_revoke(email):
         """Revoke a user's access."""
-        store = _get_auth_store(app_name)
+        store = admin_store(app_name)
         _run(store.delete(email))
         click.echo(f"Revoked: {email}")
 
@@ -1048,7 +1093,7 @@ def create_admin_cli(app_name: str) -> click.Group:
         resolved_url = _resolve_url(None, app_name)
         token = None
         if user:
-            store = _get_auth_store(app_name)
+            store = admin_store(app_name)
             result = _run(store.create_token(user))
             token = result["token"]
 

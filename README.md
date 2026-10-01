@@ -997,12 +997,19 @@ where the per-app admin CLI isn't installed locally.
 
 ```bash
 # Per-app admin CLI (preferred) — local or remote
-my-app-admin connect local
 my-app-admin connect https://your-service --signing-key xxx
+my-app-admin connect local     # switch to the local store; the remote stays saved
+my-app-admin connect remote    # switch back to the saved remote, no key needed
 
 # Generic CLI — remote only, single connection
 mcp-app connect https://your-service --signing-key xxx
 ```
+
+Switching to `local` keeps the saved remote URL and signing key, so
+`connect remote` returns to it without re-entering the key.
+`connect <url>` without `--signing-key` reuses the saved key when the URL
+is unchanged; a different URL (or an explicit `--signing-key`) replaces
+it.
 
 `connect local` is only available on the per-app admin CLI
 because it needs the app name to locate the filesystem store
@@ -1012,11 +1019,25 @@ which app it's managing, so it only supports remote targets.
 Connection config is set once and never repeated. No other
 command accepts `--url` or `--signing-key`.
 
-**Note:** the framework currently tracks one connection per app
-— a single deployment environment (local or remote), not
-multiple environments. If you deploy the same app to staging
-and production, `connect` switches between them but only
-remembers the last one configured.
+**Note:** the framework tracks one saved remote per app plus the
+local store. If you deploy the same app to staging and production,
+connecting to one replaces the saved remote for the other.
+
+### App-specific admin commands
+
+Apps can add their own commands to the per-app admin CLI with
+`app.admin_cli.add_command(...)`. To read or write users on the target
+selected by `connect` — exactly where the built-in `users` commands do —
+use the public helpers:
+
+```python
+from mcp_app import admin_store, admin_target
+
+store = admin_store("my-app")        # local store or remote adapter
+target = admin_target("my-app")      # "local" or "remote"
+# ... await store.update_profile(email, {...}) ...
+# remote adapters hold an HTTP client: await store.aclose() when done
+```
 
 ### Managing users
 
