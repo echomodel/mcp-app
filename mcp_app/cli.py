@@ -510,7 +510,7 @@ def probe(user, as_json):
 @main.command()
 @click.argument("name")
 @click.option("--user", default=None, help="Mint a fresh token for this user. Otherwise uses a placeholder.")
-@click.option("--client", "clients", multiple=True, type=click.Choice(["claude", "gemini", "claude.ai"]),
+@click.option("--client", "clients", multiple=True, type=click.Choice(["claude", "agy", "claude.ai"]),
               help="Limit to specific client(s).")
 @click.option("--scope", "scopes", multiple=True, type=click.Choice(["user", "project"]),
               help="Limit to specific scope(s).")
@@ -585,6 +585,22 @@ def admin_store(app_name: str):
     )
 
 
+async def _with_admin_store(app_name: str, work):
+    """Run ``await work(store)`` against the admin store, then close it.
+
+    Commands that make several store calls must make them inside one
+    ``asyncio.run`` cycle: a remote store's httpx.AsyncClient pool is bound
+    to the event loop that first uses it, and a second cycle fails with
+    ``RuntimeError: Event loop is closed``.
+    """
+    store = admin_store(app_name)
+    try:
+        return await work(store)
+    finally:
+        if hasattr(store, "aclose"):
+            await store.aclose()
+
+
 def _require_remote_adapter(app_name: str | None):
     """Return a RemoteAuthAdapter for the configured connection.
 
@@ -615,7 +631,24 @@ def _safe_tool_command(invoke, as_json, user, app_name: str | None):
     bearer token, etc.
     """
     adapter = _require_remote_adapter(app_name)
-    envelope = _run(adapter.get_safe_tool())
+
+    # One asyncio.run cycle for both requests, closing the client before the
+    # loop exits: the adapter's httpx.AsyncClient pool is bound to the loop
+    # that first uses it (see _tools_call_command).
+    async def _fetch_and_invoke():
+        try:
+            envelope = await adapter.get_safe_tool()
+            result = None
+            if invoke and envelope.get("supported"):
+                tool = envelope["tool"]
+                result = await adapter.call_tool(
+                    tool["name"], tool.get("arguments") or {}, user_email=user
+                )
+            return envelope, result
+        finally:
+            await adapter.aclose()
+
+    envelope, result = _run_probe(_fetch_and_invoke())
 
     if invoke:
         if not envelope.get("supported"):
@@ -626,8 +659,6 @@ def _safe_tool_command(invoke, as_json, user, app_name: str | None):
             raise click.ClickException(
                 "Cannot invoke — no safe tool declared by this deployment."
             )
-        tool = envelope["tool"]
-        result = _run_probe(adapter.call_tool(tool["name"], tool.get("arguments") or {}, user_email=user))
         envelope["invocation"] = result["invocation"]
         envelope["result"] = result["result"]
         envelope["probed_as"] = result["probed_as"]
@@ -980,17 +1011,19 @@ def create_admin_cli(app_name: str) -> click.Group:
         @click.argument("value")
         def users_update_profile(email, key, value):
             __doc__ = "\n".join(help_lines)
-            store = admin_store(app_name)
-            existing = _run(store.get_full(email))
-            if not existing:
-                raise click.ClickException(f"User not found: {email}")
-            # Validate against the merged post-update state so models with
-            # multiple required fields (or cross-field validators) accept
-            # partial patches against an already-complete profile.
-            existing_profile = existing.profile or {}
-            merged = {**existing_profile, key: value}
-            _validate_profile(merged)
-            _run(store.update_profile(email, {key: value}))
+            async def _update(store):
+                existing = await store.get_full(email)
+                if not existing:
+                    raise click.ClickException(f"User not found: {email}")
+                # Validate against the merged post-update state so models with
+                # multiple required fields (or cross-field validators) accept
+                # partial patches against an already-complete profile.
+                existing_profile = existing.profile or {}
+                merged = {**existing_profile, key: value}
+                _validate_profile(merged)
+                await store.update_profile(email, {key: value})
+
+            _run(_with_admin_store(app_name, _update))
             click.echo(f"Updated {key} for {email}")
 
         users_update_profile.help = "\n".join(help_lines)
@@ -1003,16 +1036,19 @@ def create_admin_cli(app_name: str) -> click.Group:
 
             DATA is a JSON string or @file with fields to merge.
             """
-            store = admin_store(app_name)
-            existing = _run(store.get_full(email))
-            if not existing:
-                raise click.ClickException(f"User not found: {email}")
             updates = _parse_profile_value(data)
-            if model:
-                existing_profile = existing.profile or {}
-                merged = {**existing_profile, **updates}
-                _validate_profile(merged)
-            _run(store.update_profile(email, updates))
+
+            async def _update(store):
+                existing = await store.get_full(email)
+                if not existing:
+                    raise click.ClickException(f"User not found: {email}")
+                if model:
+                    existing_profile = existing.profile or {}
+                    merged = {**existing_profile, **updates}
+                    _validate_profile(merged)
+                await store.update_profile(email, updates)
+
+            _run(_with_admin_store(app_name, _update))
             click.echo(f"Updated profile for {email}")
 
     @users.command("get-profile")
@@ -1075,7 +1111,7 @@ def create_admin_cli(app_name: str) -> click.Group:
     @cli.command()
     @click.option("--user", default=None, help="Mint a fresh token for this user.")
     @click.option("--client", "clients", multiple=True,
-                  type=click.Choice(["claude", "gemini", "claude.ai"]),
+                  type=click.Choice(["claude", "agy", "claude.ai"]),
                   help="Limit to specific client(s).")
     @click.option("--scope", "scopes", multiple=True,
                   type=click.Choice(["user", "project"]),

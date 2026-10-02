@@ -66,7 +66,7 @@ for this skill:
    - **6b. Connect an end user** (admin → end-user handoff) —
      operator runs `register --user <email>` to mint a token and
      produce the exact commands the end user pastes into their
-     MCP client (Claude Code, Gemini CLI, or Claude.ai web). The
+     MCP client (Claude Code, Antigravity CLI, or Claude.ai web). The
      admin and end user may be the same person (self-serve) or
      different people; either way, the output of `register` is
      consumed by an end-user-on-their-laptop persona, not the
@@ -290,7 +290,7 @@ Both follow the same repo structure.
      fallback chains that check both old and new paths —
      that defeats the purpose of migrating. The SDK reads
      credentials from `current_user.get().profile`, period.
-   - MCP clients (Claude.ai, Claude Code, Gemini CLI) will
+   - MCP clients (Claude.ai, Claude Code, Antigravity CLI) will
      need new tokens and possibly updated endpoint URLs
    - Check for existing user data on disk or in cloud storage
      that may need format conversion
@@ -351,7 +351,7 @@ After the mode's own work is done:
      >     cloud deployment of this solution
      > (b) deploy current code to a cloud target
      > (c) manage users or rotate credentials on a deployment
-     > (d) register an MCP client (Claude Code, Gemini CLI,
+     > (d) register an MCP client (Claude Code, Antigravity CLI,
      >     Claude.ai, etc.) against a deployment
      > (e) none of the above — we're done
 
@@ -2006,7 +2006,7 @@ For users who want to run the tool on their own machine:
 
 - How to `pipx install` (or `pip install`) the app
 - How to register with MCP clients for stdio
-  (`claude mcp add`, `gemini mcp add`, full command)
+  (`claude mcp add`, `agy mcp add`, full command)
 - Whether stdio mode needs per-user credentials and how to
   provide them (if the app has a profile model, describe
   how to set profile data for the `local` user — typically
@@ -2129,7 +2129,7 @@ Concrete commands for this app's profile shape:
 - `my-app-admin register --user <email>` — generates the
   per-client setup commands the end user runs to add the
   deployment to their MCP client
-- Manual MCP client config as fallback (claude/gemini
+- Manual MCP client config as fallback (claude/agy
   `mcp add` commands with HTTP transport, header-based
   auth, the `${VAR}` env expansion pattern that both
   clients support for keeping tokens out of config files)
@@ -2233,7 +2233,7 @@ reader needs to navigate. Coherent product, not history exposé.
 
 ## Run locally (stdio)
 
-<claude mcp add / gemini mcp add commands>
+<claude mcp add / agy mcp add commands>
 <profile setup for the local user if applicable>
 
 ## Deploy
@@ -2369,7 +2369,7 @@ that have emerged across multiple apps built on this framework:
   most-searched workflow after initial setup. Give it a
   heading.
 - **MCP client config shown for all three clients**
-  (Claude Code, Gemini CLI, Claude.ai URL). Don't make
+  (Claude Code, Antigravity CLI, Claude.ai URL). Don't make
   the reader figure out which subset their client
   supports.
 

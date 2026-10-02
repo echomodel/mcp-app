@@ -974,8 +974,8 @@ you can replay it manually.
 my-app-admin register --user alice@example.com
 ```
 
-This outputs ready-to-paste commands for Claude Code, Gemini
-CLI, and the Claude.ai URL form.
+This outputs ready-to-paste commands for Claude Code, Antigravity
+CLI (`agy`), and the Claude.ai URL form.
 
 ## User Management
 
@@ -1077,10 +1077,10 @@ No signing key needed — stdio has no JWT auth.
 **CLI registration:**
 ```bash
 claude mcp add my-app -- my-app-mcp stdio --user local
-gemini mcp add my-app -- my-app-mcp stdio --user local
+agy mcp add my-app -- my-app-mcp stdio --user local
 ```
 
-**Manual config** (`~/.claude.json` or `~/.gemini/settings.json`):
+**Manual config** (`~/.claude.json`, or agy's `~/.gemini/config/mcp_config.json`):
 ```json
 {
   "mcpServers": {
@@ -1099,9 +1099,13 @@ gemini mcp add my-app -- my-app-mcp stdio --user local
 claude mcp add --transport http my-app \
   https://your-service/ \
   --header "Authorization: Bearer USER_TOKEN"
+
+# agy: flags go before the name; one user-level config, no scopes
+agy mcp add --header "Authorization: Bearer USER_TOKEN" my-app https://your-service/
 ```
 
-**Manual config** (`~/.claude.json` or `~/.gemini/settings.json`):
+**Manual config** (`~/.claude.json` shown; agy's `~/.gemini/config/mcp_config.json`
+uses the same layout but names the URL key `serverUrl`):
 ```json
 {
   "mcpServers": {
@@ -1115,9 +1119,9 @@ claude mcp add --transport http my-app \
 }
 ```
 
-Both Claude Code and Gemini CLI support `${VAR}` expansion in
-config files — reference a host environment variable instead of
-pasting the token directly.
+Claude Code supports `${VAR}` expansion in config files —
+reference a host environment variable instead of pasting the
+token directly.
 
 **Claude.ai / Claude mobile (remote via URL):**
 ```

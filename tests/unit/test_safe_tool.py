@@ -155,8 +155,13 @@ def _mock_envelope_adapter(envelope, call_result=None):
     """Test helper: a stand-in adapter that returns a known envelope."""
 
     class _Stub:
+        closed = False
+
         async def get_safe_tool(self_):
             return envelope
+
+        async def aclose(self_):
+            type(self_).closed = True
 
         async def call_tool(self_, name, arguments, user_email=None):
             return call_result or {

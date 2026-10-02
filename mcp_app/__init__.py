@@ -1,6 +1,6 @@
 """mcp-app: Config-driven MCP application framework."""
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 from mcp_app.app import App, SafeTool, mcp_transport
 from mcp_app.context import current_user, register_profile

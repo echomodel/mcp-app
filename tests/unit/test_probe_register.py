@@ -140,8 +140,8 @@ class TestGenerateRegistrations:
         clients_scopes = [(e["client"], e["scope"]) for e in entries]
         assert ("claude", "user") in clients_scopes
         assert ("claude", "project") in clients_scopes
-        assert ("gemini", "user") in clients_scopes
-        assert ("gemini", "project") in clients_scopes
+        assert ("agy", None) in clients_scopes
+        assert not any(c == "gemini" for c, _ in clients_scopes)
         assert ("claude.ai", None) in clients_scopes
         for e in entries:
             if e["client"] != "claude.ai":
@@ -167,7 +167,7 @@ class TestGenerateRegistrations:
     def test_filter_scope(self):
         reg = generate_registrations(name="x", url="https://a.com/", scopes=["user"])
         for e in reg["entries"]:
-            if e["client"] != "claude.ai":
+            if e["client"] == "claude":
                 assert e["scope"] == "user"
 
     def test_claude_ai_has_token_in_url(self):
@@ -177,13 +177,30 @@ class TestGenerateRegistrations:
         assert "token=t" in ai[0]["command"]
 
 
+class TestAgyRegistration:
+
+    def test_agy_command_puts_flags_before_name(self):
+        reg = generate_registrations(name="my-app", url="https://a.com/", token="t", clients=["agy"])
+        [entry] = reg["entries"]
+        assert entry["scope"] is None
+        assert entry["command"] == 'agy mcp add --header "Authorization: Bearer t" my-app https://a.com/'
+
+    def test_agy_ignores_scope_filter(self):
+        reg = generate_registrations(name="x", url="https://a.com/", clients=["agy"], scopes=["project"])
+        assert [e["scope"] for e in reg["entries"]] == [None]
+
+    def test_agy_text_label(self):
+        text = format_registrations(generate_registrations(name="x", url="https://a.com/", clients=["agy"]))
+        assert "agy (user config, status unknown):" in text
+
+
 class TestFormatRegistrations:
 
     def test_output_contains_all_entries(self):
         reg = generate_registrations(name="x", url="https://a.com/")
         text = format_registrations(reg)
         assert "claude" in text
-        assert "gemini" in text
+        assert "agy" in text
         assert "claude.ai" in text
 
     def test_output_shows_manual_for_claude_ai(self):

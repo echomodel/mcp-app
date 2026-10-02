@@ -86,7 +86,7 @@ async def register_commands(
 ) -> dict:
     """Generate MCP client registration commands for a deployed instance.
 
-    Returns the exact commands to paste into Claude Code, Gemini CLI,
+    Returns the exact commands to paste into Claude Code, Antigravity CLI (agy),
     or the URL form for Claude.ai. If user_email is provided, a fresh
     token is minted for them. Otherwise a placeholder is emitted.
     """

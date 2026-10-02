@@ -1,6 +1,6 @@
 ---
 name: mcp-app-admin
-description: "Operate and manage deployed MCP apps or solutions that use the mcp-app framework. Use when asked to verify a deployment, connect the admin CLI, retrieve a signing key, register or manage users, issue or revoke tokens, update a user's profile with a fresh credential, test a deployed service end-to-end, configure a deployed MCP server for use in Claude, Gemini, or other agent platforms, or troubleshoot post-deploy auth. Also use proactively whenever a user reports that a deployed mcp-app MCP server is misbehaving — connection failures, auth errors, 401/403 responses, tools not appearing, client says 'failed to connect', token not working, or any symptom-level report from a client or the deployed service. Triggers on: verify deployment, test the deployed service, manage users, add a user, list users, revoke a user, update a token, refresh a credential, get the signing key, connect the admin CLI, configure MCP client, issue a new token, probe, register, MCP not working, MCP failed to connect, can't connect to MCP, client reports failed, 403 from deployed MCP, 401 from deployed MCP, auth failing on MCP, token not working, tools not listed, and similar post-deploy operational tasks or failure reports on running mcp-app services."
+description: "Operate and manage deployed MCP apps or solutions that use the mcp-app framework. Use when asked to verify a deployment, connect the admin CLI, retrieve a signing key, register or manage users, issue or revoke tokens, update a user's profile with a fresh credential, test a deployed service end-to-end, configure a deployed MCP server for use in Claude, Antigravity CLI (agy), or other agent platforms, or troubleshoot post-deploy auth. Also use proactively whenever a user reports that a deployed mcp-app MCP server is misbehaving — connection failures, auth errors, 401/403 responses, tools not appearing, client says 'failed to connect', token not working, or any symptom-level report from a client or the deployed service. Triggers on: verify deployment, test the deployed service, manage users, add a user, list users, revoke a user, update a token, refresh a credential, get the signing key, connect the admin CLI, configure MCP client, issue a new token, probe, register, MCP not working, MCP failed to connect, can't connect to MCP, client reports failed, 403 from deployed MCP, 401 from deployed MCP, auth failing on MCP, token not working, tools not listed, and similar post-deploy operational tasks or failure reports on running mcp-app services."
 ---
 
 # mcp-app Admin
@@ -59,7 +59,7 @@ journeys 4–6:
   `probe` for the framework layer, `tools list/show/call` for
   discovery and ad-hoc invocation, `safe-tool --invoke` for the
   opinionated end-to-end smoke test (when declared), and
-  `register` to emit Claude Code, Gemini CLI, and Claude.ai
+  `register` to emit Claude Code, Antigravity CLI (`agy`), and Claude.ai
   URL-form commands.
 
 Journeys 1–3 (install, run locally, deploy) are outside this
@@ -569,8 +569,10 @@ my-solution-admin register --user alice@example.com
 my-solution-admin register
 ```
 
-This outputs commands for Claude Code, Gemini CLI, and the
-Claude.ai URL form, with the URL and token already substituted.
+This outputs commands for Claude Code, Antigravity CLI (`agy`),
+and the Claude.ai URL form, with the URL and token already
+substituted. agy has one user-level config, so it gets a single
+command with no scope.
 
 For structured output:
 ```bash
@@ -587,7 +589,7 @@ my-solution-admin register --user alice@example.com --client claude --scope user
 **stdio (local):**
 ```bash
 claude mcp add my-solution -- my-solution-mcp stdio --user local
-gemini mcp add my-solution -- my-solution-mcp stdio --user local
+agy mcp add my-solution -- my-solution-mcp stdio --user local
 ```
 
 **HTTP (remote):**
@@ -595,6 +597,9 @@ gemini mcp add my-solution -- my-solution-mcp stdio --user local
 claude mcp add --transport http my-solution \
   https://your-service/ \
   --header "Authorization: Bearer USER_TOKEN"
+
+# agy: flags before the name
+agy mcp add --header "Authorization: Bearer USER_TOKEN" my-solution https://your-service/
 ```
 
 **Claude.ai / Claude mobile:**

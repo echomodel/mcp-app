@@ -73,7 +73,7 @@ decisions, skill maintenance (this file), testing patterns,
 and dependencies.
 
 **2. Skills (this repo, `skills/`)** — `author-mcp-app` and
-`mcp-app-admin`. Audience: agents (Claude Code, Gemini CLI,
+`mcp-app-admin`. Audience: agents (Claude Code, Antigravity CLI,
 any agentskills.io-compatible environment) working with
 implementing apps. These are installed into an agent's skill
 directory, typically as symlinks back to this repo. They

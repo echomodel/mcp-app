@@ -1,7 +1,7 @@
 """Client registration command generation for deployed mcp-app instances.
 
 Produces the exact commands an operator (or agent) pastes into each MCP
-client (Claude Code, Gemini CLI) and the URL form used by Claude.ai, for
+client (Claude Code, Antigravity CLI `agy`) and the URL form used by Claude.ai, for
 a given deployed service URL and bearer token.
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 
-CLIENTS = ("claude", "gemini", "claude.ai")
+CLIENTS = ("claude", "agy", "claude.ai")
 SCOPES = ("user", "project")
 
 TOKEN_PLACEHOLDER = "<YOUR_PAT>"
@@ -24,12 +24,10 @@ def _claude_cmd(name: str, url: str, token: str, scope: str) -> str:
     )
 
 
-def _gemini_cmd(name: str, url: str, token: str, scope: str) -> str:
-    return (
-        f'gemini mcp add {name} {url} '
-        f'--scope {scope} --transport http '
-        f'--header "Authorization: Bearer {token}"'
-    )
+def _agy_cmd(name: str, url: str, token: str) -> str:
+    # agy requires flags before <name>; http URLs set the server type.
+    return f'agy mcp add --header "Authorization: Bearer {token}" {name} {url}'
+
 
 
 def _claude_ai_url(url: str, token: str) -> str:
@@ -51,11 +49,11 @@ def _is_registered(client: str, name: str, scope: str) -> bool | None:
                 ["claude", "mcp", "list", "-s", scope],
                 capture_output=True, text=True, timeout=5,
             )
-        elif client == "gemini":
-            if not shutil.which("gemini"):
+        elif client == "agy":
+            if not shutil.which("agy"):
                 return None
             proc = subprocess.run(
-                ["gemini", "mcp", "list", "--scope", scope],
+                ["agy", "mcp", "list"],
                 capture_output=True, text=True, timeout=5,
             )
         else:
@@ -82,9 +80,10 @@ def generate_registrations(
         url: Deployed service base URL. Must end with '/'.
         token: User bearer token. If None, a placeholder is emitted so the
             operator can substitute after minting a token.
-        clients: Subset of {"claude", "gemini", "claude.ai"}. Default: all.
-        scopes: Subset of {"user", "project"}. Default: all. Ignored for
-            claude.ai (always a URL form).
+        clients: Subset of {"claude", "agy", "claude.ai"}. Default: all.
+        scopes: Subset of {"user", "project"}. Default: all. Applies to
+            claude only; agy has one user-level config and claude.ai is a
+            URL form.
         detect_registered: If True, shell out to each CLI's list command to
             note whether the name is already registered at that scope.
 
@@ -108,11 +107,17 @@ def generate_registrations(
                 "registered": None,
             })
             continue
+        if client == "agy":
+            entries.append({
+                "client": "agy",
+                "scope": None,
+                "command": _agy_cmd(name, url, tok),
+                "registered": _is_registered("agy", name, "user") if detect_registered else None,
+            })
+            continue
         for scope in scopes:
             if client == "claude":
                 cmd = _claude_cmd(name, url, tok, scope)
-            elif client == "gemini":
-                cmd = _gemini_cmd(name, url, tok, scope)
             else:
                 continue
             registered = (
@@ -140,14 +145,16 @@ def format_registrations(result: dict) -> str:
         client = e["client"]
         scope = e["scope"]
         reg = e["registered"]
-        if scope is None:
+        status = (
+            "registered" if reg is True
+            else "not registered" if reg is False
+            else "status unknown"
+        )
+        if client == "claude.ai":
             label = f"{client} (manual)"
+        elif scope is None:
+            label = f"{client} (user config, {status})"
         else:
-            status = (
-                "registered" if reg is True
-                else "not registered" if reg is False
-                else "status unknown"
-            )
             label = f"{client} ({scope} scope, {status})"
         lines.append(f"{label}:")
         lines.append(f"  {e['command']}")
