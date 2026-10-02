@@ -100,7 +100,7 @@ This skill holds itself to the following bar: when
 are available in the environment during an authoring or
 review pass, this skill must absorb their guidance into the
 solution repo's own `README.md`, `CONTRIBUTING.md`, and agent
-context files (`CLAUDE.md`, `.gemini/settings.json`) — in
+context files (`CLAUDE.md`, `AGENTS.md`) — in
 app-specific and often more concrete terms than the skills
 themselves can offer. After the pass, a future agent opening
 the solution repo with **neither skill loaded** must be able
@@ -132,8 +132,7 @@ workflow, verify the bar:
    and how to satisfy mcp-app compliance rules — without
    pointing a reader back to either skill?
 3. Confirm `CLAUDE.md` imports `@README.md` and
-   `@CONTRIBUTING.md`, and that `.gemini/settings.json`
-   declares both in `context.fileName`.
+   `@CONTRIBUTING.md`, and that `AGENTS.md` points to both.
 4. Mentally simulate three representative tasks with an
    agent that has neither skill loaded:
    - Add a tool that calls a new SDK method
@@ -607,7 +606,7 @@ while building an app against it), the workflow is symmetric:
 - [ ] CONTRIBUTING.md with architecture and testing standards
 - [ ] CONTRIBUTING.md defines the release process (version from `vX.Y.Z` tags, bump rules, deploy the tag)
 - [ ] CLAUDE.md: `@README.md` and `@CONTRIBUTING.md`
-- [ ] `.gemini/settings.json` with context file declarations
+- [ ] `AGENTS.md` pointing to README and CONTRIBUTING (for Antigravity CLI)
 
 ### Deployment Readiness
 - [ ] Deployable as a standard container image
@@ -1815,9 +1814,8 @@ venv/
 # Claude Code
 .claude/
 
-# Gemini (except settings.json)
-.gemini/*
-!.gemini/settings.json
+# Antigravity / Gemini local files
+.gemini/
 
 # OS
 .DS_Store
@@ -2381,27 +2379,25 @@ that have emerged across multiple apps built on this framework:
 @CONTRIBUTING.md
 ```
 
-**`.gemini/settings.json`:**
-```json
-{
-  "context": {
-    "fileName": ["README.md", "CONTRIBUTING.md"]
-  }
-}
+**`AGENTS.md`** (Antigravity CLI loads it automatically; it
+does not read `CLAUDE.md` or `.gemini/settings.json`):
+```markdown
+Read the [project README](README.md) and the
+[contributing guide](CONTRIBUTING.md) before working in this repo.
 ```
 
 These files make the README and CONTRIBUTING content
-automatically available to Claude Code and Gemini CLI when
-they operate in the repo — a user or agent working in the
+available to Claude Code and Antigravity CLI when they
+operate in the repo — a user or agent working in the
 repo has the full operational context without needing to
 load any skill.
 
 ### Agent context setup
 
 If the app is being onboarded for AI-assisted development for
-the first time — or if `CLAUDE.md`, `.gemini/settings.json`,
-and `.gitignore` aren't yet set up correctly — the broader
-goal is: Claude Code, Gemini CLI, and any other agent that
+the first time — or if `CLAUDE.md`, `AGENTS.md`, and
+`.gitignore` aren't yet set up correctly — the broader
+goal is: Claude Code, Antigravity CLI, and any other agent that
 opens the repo should automatically load README and
 CONTRIBUTING, not leak agent-specific scratch files into the
 repo, and share configuration that's universally useful
@@ -2409,10 +2405,8 @@ across tools.
 
 The minimum:
 - `CLAUDE.md` imports `@README.md` and `@CONTRIBUTING.md`
-- `.gemini/settings.json` declares `README.md` and
-  `CONTRIBUTING.md` as context files
-- `.gitignore` ignores `.claude/` entirely and everything
-  under `.gemini/` except `settings.json`
+- `AGENTS.md` points to `README.md` and `CONTRIBUTING.md`
+- `.gitignore` ignores `.claude/` and `.gemini/` entirely
 
 If the `setup-agent-context` skill is available in the
 environment, it automates and standardizes this across repos.

@@ -1206,9 +1206,11 @@ go live immediately:
 ln -s $(pwd)/skills/author-mcp-app  ~/.claude/skills/author-mcp-app
 ln -s $(pwd)/skills/mcp-app-admin   ~/.claude/skills/mcp-app-admin
 
-# Gemini CLI — link from local clone
-gemini skills link ./skills/author-mcp-app
-gemini skills link ./skills/mcp-app-admin
+# Antigravity CLI (agy) — symlink into its skills folder. Run from inside
+# that folder with a path relative to it, so the link holds no absolute path:
+cd ~/.gemini/config/skills
+ln -s <relative-path-to-clone>/skills/author-mcp-app author-mcp-app
+ln -s <relative-path-to-clone>/skills/mcp-app-admin  mcp-app-admin
 ```
 
 Install method may vary by agent platform; follow the
@@ -1246,7 +1248,7 @@ designed — when `mcp-app-admin` and any other relevant
 accelerator skills are available in the environment at
 authoring time — to absorb their guidance into the solution
 repo's own `README.md`, `CONTRIBUTING.md`, and agent context
-files (`CLAUDE.md`, `.gemini/settings.json`) in app-specific
+files (`CLAUDE.md`, `AGENTS.md`) in app-specific
 and often more concrete terms than the skills themselves can
 offer. The solution repo's docs end up carrying the complete
 end-to-end process — authoring AND operating — expressed in
