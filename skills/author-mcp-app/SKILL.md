@@ -603,6 +603,7 @@ while building an app against it), the workflow is symmetric:
 ### Documentation
 - [ ] README.md with quick start, deployment, config
 - [ ] CONTRIBUTING.md with architecture and testing standards
+- [ ] CONTRIBUTING.md defines the release process (version from `vX.Y.Z` tags, bump rules, deploy the tag)
 - [ ] CLAUDE.md: `@README.md` and `@CONTRIBUTING.md`
 - [ ] `.gemini/settings.json` with context file declarations
 
@@ -2309,6 +2310,15 @@ breaking compliance:
   app-specific XDG paths
 - Where deployment configuration lives and what owns it
   (the deployment tool vs. the app)
+- Release process. Version comes from `vX.Y.Z` git tags
+  (setuptools-scm; add `.git_archival.txt` with `export-subst`
+  when the deploy builds from `git archive`), never a
+  hand-edited number. Bump: patch for fixes, minor for
+  features; breaking changes on 0.x are minor; a new major only
+  with the author's approval. Tag the reviewed commit, push it
+  and the tag, then deploy that tag: the CI deploy runs against
+  the tag ref (e.g. `gapp_ci_trigger(ref="vX.Y.Z")`), not a
+  local deploy or a branch. Verify with `probe` and a tool call.
 - Any app-specific design decisions that future
   contributors need to know (stored profile fields,
   refresh behavior, custom middleware if any)
