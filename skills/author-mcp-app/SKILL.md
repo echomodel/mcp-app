@@ -2328,8 +2328,8 @@ breaking compliance:
   features; breaking changes on 0.x are minor; a new major only
   with the author's approval. Tag the reviewed commit, push it
   and the tag, then deploy that tag: the CI deploy runs against
-  the tag ref (e.g. `gapp_ci_trigger(ref="vX.Y.Z")`), not a
-  local deploy or a branch. Verify with `probe` and a tool call.
+  the tag ref, not a local deploy or a branch. Verify with
+  `probe` and a tool call.
 - Any app-specific design decisions that future
   contributors need to know (stored profile fields,
   refresh behavior, custom middleware if any)
