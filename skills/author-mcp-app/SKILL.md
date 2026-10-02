@@ -1,6 +1,6 @@
 ---
 name: author-mcp-app
-description: "Build, structure, deploy, and manage Python MCP servers and web APIs. Use when asked to create a new MCP server, structure a solution repo, add multi-user auth, set up a data store, migrate an existing app, review an app against standards, deploy and test a solution, manage users on a deployed instance, connect an admin CLI, or any question about building or operating a deployable Python MCP service — \"create an MCP server\", \"add auth to my app\", \"deploy and test this\", \"redeploy and verify\", \"set up user management\", \"manage users\", \"connect the admin CLI\", \"how do I get the signing key\", \"make this multi-user\", \"review my solution\", \"is this ready to deploy\", etc."
+description: "Build, structure, deploy, and manage Python MCP servers and web APIs. Use when asked to create a new MCP server, structure a solution repo, add multi-user auth, set up a data store, migrate an existing app, review an app against standards, evaluate whether agents can use its tools correctly from the tool descriptions alone, deploy and test a solution, manage users on a deployed instance, connect an admin CLI, or any question about building or operating a deployable Python MCP service — \"create an MCP server\", \"add auth to my app\", \"deploy and test this\", \"redeploy and verify\", \"set up user management\", \"manage users\", \"connect the admin CLI\", \"how do I get the signing key\", \"make this multi-user\", \"review my solution\", \"is this ready to deploy\", \"test my tool descriptions with an agent\", \"eval the MCP tools\", etc."
 disable-model-invocation: false
 user-invocable: true
 ---
@@ -598,6 +598,8 @@ while building an app against it), the workflow is symmetric:
   `pipx list | grep -A5 <package>` for the `(editable)` marker
   before trusting any stdio smoke-test result.
 - [ ] Live stdio smoke test passes against the editable install
+- [ ] Tools that write, delete, or edit by position pass an agent eval
+  from their descriptions alone (see Step 6 in Testing and Validation)
   (Step 3 in Testing and Validation)
 
 ### Documentation
@@ -1630,6 +1632,15 @@ tool.
 - After upgrading mcp-app to a newer version
 - After any migration or structural change
 - As part of any compliance review
+
+### Step 6: Agent evals (when tools can damage data)
+
+Tests prove the tools work; an agent eval proves an agent **uses** them
+correctly from their descriptions alone. Run one when adding or reworking
+tools that write, delete, or edit by position, after changing a tool's
+description, and before releasing a breaking change to the tool surface.
+Method, pass criteria, and verified harness recipes:
+[references/agent-evals.md](references/agent-evals.md).
 
 ### When to stub
 
