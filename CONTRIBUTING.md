@@ -23,34 +23,33 @@ rather than the app).
 "free tests for auth and admin" or just reference the subsystem
 package name directly.
 
-### Every mcp-app change must be reviewed against both skills
+### Every mcp-app change must be reviewed against the skill
 
-This repo ships two skills under `skills/`:
-
-- **`author-mcp-app`** — the primary guide agents and developers
-  use to build, migrate, and review apps on this framework.
-- **`mcp-app-admin`** — the guide for operators and agents
-  managing deployed mcp-app solutions (connect, verify, users,
-  tokens, MCP client registration).
+This repo ships one skill, **`mcp-app`**, under `skills/mcp-app/`.
+It is the guide agents use to build, migrate, review, test,
+deploy, and operate apps on this framework. `SKILL.md` holds the
+fit check, the invariants, and a routing table; the substance
+lives in `skills/mcp-app/references/`.
 
 Any change to mcp-app — new features, API changes, behavioral
 changes, new configuration, new testing patterns, new CLI
 commands, changed admin endpoints — must be accompanied by a
-review of both skills to ensure they capture the change. If
-the skills don't reflect the current framework, agents will
-build or operate apps wrong.
+review of the skill to ensure it captures the change. The
+charter table below names the reference file that holds each
+topic. If the skill doesn't reflect the current framework,
+agents will build or operate apps wrong.
 
 This includes changes to: the `App` class, `mcp_app.testing`
 modules, CLI factories, middleware, store protocol,
 identity enforcement, admin endpoints, entry point conventions,
 and deployment patterns. If it affects how an implementer
 integrates, configures, tests, deploys, or operates — the
-relevant skill(s) must be updated in the same change.
+skill must be updated in the same change.
 
-The skills are part of the product. Changes to mcp-app that
-don't update the skills should be treated as incomplete — the
-skills are what agents use to build correctly and operate
-safely on the framework.
+The skill is part of the product. Changes to mcp-app that
+don't update it should be treated as incomplete — the skill
+is what agents use to build correctly and operate safely on
+the framework.
 
 ## Documentation hygiene
 
@@ -72,13 +71,12 @@ architecture. CONTRIBUTING covers: terminology, architectural
 decisions, skill maintenance (this file), testing patterns,
 and dependencies.
 
-**2. Skills (this repo, `skills/`)** — `author-mcp-app` and
-`mcp-app-admin`. Audience: agents (Claude Code, Antigravity CLI,
-any agentskills.io-compatible environment) working with
-implementing apps. These are installed into an agent's skill
-directory, typically as symlinks back to this repo. They
-operate in *other* repos (the implementing app's repo) and
-therefore **must not assume the framework README or
+**2. The skill (this repo, `skills/mcp-app/`)** — Audience:
+agents (Claude Code, Antigravity CLI, any agentskills.io-compatible
+environment) working with implementing apps. It is installed into
+an agent's skill directory (a symlink back to this repo, or a
+`.skill` bundle saved to a Claude account). It operates in *other*
+repos (the implementing app's repo) and therefore **must not assume the framework README or
 CONTRIBUTING is loaded into the agent's context**. Every piece
 of information a skill needs to act correctly must be in the
 skill itself.
@@ -96,24 +94,47 @@ most, never a prerequisite.
 ### Maintenance rules
 
 **Deployment-agnostic default posture is maintained across all
-three tiers.** The framework README, the `author-mcp-app`
-skill, and implementing app docs all default to describing a
+three tiers.** The framework README, the `mcp-app` skill,
+and implementing app docs all default to describing a
 runtime contract rather than prescribing a deployment target.
 The three-part framing (agnostic default / where deployment
 config actually lives / opinionated-tooling alternative) lives
-in the framework README and must be mirrored in the
-`author-mcp-app` skill. If one drifts, the other will too.
+in the framework README and must be mirrored in the skill's
+`references/app-docs.md`. If one drifts, the other will too.
 
 **skill-author guidelines govern skill frontmatter and
-cross-references.** Both skills must comply with the
-agentskills.io-based `skill-author` guidelines: imperative
-"Use when..." descriptions with synonym coverage, no
-disqualifying platform language in the description, pure
-instructions (no bundled scripts), and hint-level cross-skill
-references (never dependencies). The two skills in this repo
-are co-packaged and may reference each other, but references
-to external skills (e.g., `setup-agent-context`) must be
-hint-level with self-contained fallback content inline.
+cross-references.** The skill must comply with the
+agentskills.io-based `skill-author` guidelines and with
+Anthropic's `skill-creator` practice: an imperative "Use
+when..." description with synonym coverage, front-loaded in
+its first 250 characters, at most 1,024 characters, no `<...>`
+text, and no disqualifying platform language; only the six
+agentskills.io frontmatter keys (the `.skill` uploader rejects
+others); pure instructions (no bundled scripts); and hint-level
+references to external skills (e.g., `setup-agent-context`)
+with self-contained fallback content inline.
+
+**Progressive disclosure keeps the skill readable.** `SKILL.md`
+stays under 500 lines and about 20 KB (it is ~160 lines today);
+only the fit check, invariants, lifecycle, routing table, and
+session close-out belong there. Everything else goes in one
+`references/*.md` file, one level deep, each listed in the
+routing table with when to read it. Keep each reference under
+800 lines and 45 KB so single-call file reads don't truncate.
+`tests/unit/test_doc_charter.py` checks these mechanically.
+
+**The description triggers broadly; the body decides fit.**
+The description fires on most MCP server work. The fit check at
+the top of `SKILL.md` makes the agent step aside silently when
+mcp-app doesn't apply. Keep negative conditions in the body,
+not the description, and keep the instruction not to pitch
+mcp-app when it doesn't fit.
+
+**Auth material lives in `references/auth.md`.** The signing
+key, admin JWTs, token lifecycle, `JWT_AUD`, token lifetime,
+and client credential forms are isolated there so a change to
+the auth model is mostly a one-file change. Other references
+point to it instead of repeating it.
 
 **Skills must be self-contained.** When adding content to a
 skill that sits alongside content in the README, do not write
@@ -134,16 +155,16 @@ audience determines tone, depth, and what counts as
   use mcp-app or an mcp-app solution. They are looking at the
   rendered repo on GitHub or in their editor.
 - **AA** — *author agents*: AI coding agents loading the
-  `author-mcp-app` skill while working on an implementing app's
-  repo. They do not have mcp-app's README in context.
+  `mcp-app` skill while working on an implementing app's repo.
+  They do not have mcp-app's README in context.
 - **OA** — *operator agents*: AI coding agents loading the
-  `mcp-app-admin` skill to operate a deployed mcp-app instance.
-  They also do not have mcp-app's README in context.
+  `mcp-app` skill to operate a deployed mcp-app instance. They
+  also do not have mcp-app's README in context.
 
-The skills are self-contained because of AA and OA: an agent
+The skill is self-contained because of AA and OA: an agent
 loaded into a different repo cannot follow "see the README"
 links — the README isn't there. So duplication between README
-and skills is intentional. The charter assigns one *canonical
+and skill is intentional. The charter assigns one *canonical
 source of truth* per topic; other artifacts may carry "Full"
 treatment too if their audience needs the full content
 in-context, "Summary" if a compressed version suffices, or
@@ -174,56 +195,62 @@ Legend for the per-artifact columns:
   posture or examples, not stated explicitly.
 - **—** — not present (and the audience doesn't need it).
 
-| Topic | SoT | README | `author-mcp-app` | `mcp-app-admin` |
-|-------|-----|--------|------------------|-----------------|
-| Value proposition / what mcp-app is | README | Full | Pointer | — |
-| Install (the framework) | README | Full | — | — |
-| Quick start (minimal app) | README | Full | Full | — |
-| Two app patterns (data-owning vs API-proxy) | README | Full | Full | Implicit |
-| Tool discovery rules | README | Full | Full | — |
-| Transport-scoped tools (`@mcp_transport`) + host-path/file-upload safety | README | Full | Full | — |
-| Environment variables (canonical table) | README | Full | Full | Referenced |
-| Data storage (path resolution + storage contract) | README | Full | Summary | Referenced |
-| Startup `data_dir` log line + fields | README | Full | Summary | Referenced |
-| `REQUIRED_FS_TYPE` assertion (matching, behavior, opt-in posture) | README | Full | Summary | Summary |
-| `/health` response shape (status enum, checks object, HTTP code mapping) | README | Full | Summary | Summary |
-| `/health` enum-only / identity-free contract | CONTRIBUTING | Summary | Referenced | Referenced |
-| `/admin/health` admin diagnostic surface | README | Full | Pointer | Full |
-| Health check naming convention (contract, not mechanism) | CONTRIBUTING | — | Referenced | — |
-| User Identity and Profile (concept + ContextVar) | README | Full | Full | Referenced |
-| Profile model declaration (`profile_expand`, fields) | README | Full | Full | — |
-| Admin REST endpoints (the API contract) | README | Full | Referenced | Referenced |
-| `SafeTool` declaration (`App.safe_tool`) | README | Summary | Full | Referenced |
-| `SafeTool` authoring rules (low-info-density) | `author-mcp-app` | Summary | Full | Pointer |
-| `tools` subcommand group (CLI shape) | README | Summary | Referenced | Full |
-| Local testing (httpx ASGI transport) | README | Full | Full | — |
-| Running the server (stdio + HTTP) | README | Full | Summary | — |
-| Runtime contract (start command, ports, endpoints) | README | Full | Full | Referenced |
-| Deployment posture (agnostic-default, opinionated alt.) | README | Full | Full | Implicit |
-| Docker / Cloud platform examples | README | Full | Pointer | — |
-| Post-deploy verification ladder (probe → tools → safe-tool) | `mcp-app-admin` | Summary | Summary | Full |
-| Six-journey map | `author-mcp-app` | — | Full | Journeys 4–6 |
-| Connect — local vs remote, generic vs per-app CLI | `mcp-app-admin` | Summary | Pointer | Full |
-| User management CLI commands (operational) | `mcp-app-admin` | Summary | Pointer | Full |
-| Token lifecycle (issuance, revocation, rotation) | `mcp-app-admin` | — | — | Full |
-| Signing-key retrieval per deploy tool | `mcp-app-admin` | — | Pointer | Full |
-| Troubleshooting decision tree | `mcp-app-admin` | — | — | Full |
-| MCP client configuration (stdio + HTTP examples) | README | Full | Pointer | Referenced |
-| `register` command output handling | README | Full | Full (auth-side) | Full (ops-side) |
-| Architecture (FastMCP+Starlette wrap, ASGI) | README | Full | Pointer | — |
-| Extra routes / custom data plane (`App.extra_routes`) | README | Full | Summary | — |
-| Free tests / conformance suite (how to adopt) | README | Full | Full | — |
+| Topic | SoT | README | `mcp-app` skill | Skill file |
+|-------|-----|--------|-----------------|------------|
+| Value proposition / what mcp-app is | README | Full | Summary | `SKILL.md` |
+| Fit check: when the skill applies and when it steps aside | `mcp-app` skill | Summary | Full | `SKILL.md` |
+| Rules that hold in every task (invariants) | `mcp-app` skill | — | Full | `SKILL.md` |
+| Install (the framework) | README | Full | Summary | `authoring.md` |
+| Quick start (minimal app) | README | Full | Full | `SKILL.md`, `authoring.md` |
+| Two app patterns (data-owning vs API-proxy) | README | Full | Full | `identity-and-profile.md` |
+| Tool discovery rules | README | Full | Full | `authoring.md` |
+| Transport-scoped tools (`@mcp_transport`) + host-path/file-upload safety | README | Full | Full | `authoring.md` |
+| Environment variables (canonical table) | README | Full | Full | `runtime-contract.md` (auth vars in `auth.md`) |
+| Data storage (path resolution + storage contract) | README | Full | Summary | `runtime-contract.md` |
+| Startup `data_dir` log line + fields | README | Full | Summary | `runtime-contract.md` |
+| `REQUIRED_FS_TYPE` assertion (matching, behavior, opt-in posture) | README | Full | Summary | `runtime-contract.md` |
+| `/health` response shape (status enum, checks object, HTTP code mapping) | README | Full | Summary | `runtime-contract.md` |
+| `/health` enum-only / identity-free contract | CONTRIBUTING | Summary | Referenced | `runtime-contract.md` |
+| `/admin/health` admin diagnostic surface | README | Full | Summary | `runtime-contract.md`, `troubleshooting.md` |
+| Health check naming convention (contract, not mechanism) | CONTRIBUTING | — | — | — |
+| User Identity and Profile (concept + ContextVar) | README | Full | Full | `identity-and-profile.md` |
+| Profile model declaration (`profile_expand`, fields) | README | Full | Full | `identity-and-profile.md` |
+| Admin REST endpoints (the API contract) | README | Full | Referenced | `runtime-contract.md` |
+| `SafeTool` declaration (`App.safe_tool`) | README | Summary | Full | `authoring.md` |
+| `SafeTool` authoring rules (low-info-density) | `mcp-app` skill | Summary | Full | `authoring.md` |
+| `tools` subcommand group (CLI shape) | README | Summary | Full | `operate.md` |
+| Local testing (httpx ASGI transport) | README | Full | Full | `testing.md` |
+| Running the server (stdio + HTTP) | README | Full | Summary | `runtime-contract.md` |
+| Runtime contract (start command, ports, endpoints) | README | Full | Full | `runtime-contract.md` |
+| Deployment posture (agnostic-default, opinionated alt.) | README | Full | Full | `app-docs.md`, `runtime-contract.md` |
+| Deploy boundary (stage-2 guidance order) | README | Full | Full | `runtime-contract.md` |
+| Docker / Cloud platform examples | README | Full | Summary | `runtime-contract.md` |
+| Post-deploy verification ladder (probe → tools → safe-tool) | `mcp-app` skill | Summary | Full | `operate.md` |
+| Six-journey map | `mcp-app` skill | — | Full | `SKILL.md` (summary), `app-docs.md` (full) |
+| Connect — local vs remote, generic vs per-app CLI | `mcp-app` skill | Summary | Full | `operate.md` |
+| User management CLI commands (operational) | `mcp-app` skill | Summary | Full | `operate.md` |
+| Auth model (signing key, admin JWTs, `JWT_AUD`, token lifetime) | README | Full | Full | `auth.md` |
+| Token lifecycle (issuance, revocation, rotation) | `mcp-app` skill | — | Full | `auth.md` |
+| Signing-key retrieval per deploy tool | `mcp-app` skill | — | Full | `auth.md` |
+| Troubleshooting decision tree and symptom table | `mcp-app` skill | — | Full | `troubleshooting.md` |
+| MCP client configuration (stdio + HTTP examples) | README | Full | Full | `operate.md` (stdio), `auth.md` (HTTP) |
+| `register` command output handling | README | Full | Full | `operate.md`, `app-docs.md` |
+| Architecture (FastMCP+Starlette wrap, ASGI) | README | Full | Pointer | `authoring.md` |
+| Extra routes / custom data plane (`App.extra_routes`) | README | Full | Summary | `authoring.md` |
+| Free tests / conformance suite (how to adopt) | README | Full | Full | `testing.md` |
+| Agent evals of tool descriptions | `mcp-app` skill | — | Full | `agent-evals.md` |
+| Framework version pin discipline and upgrades | `mcp-app` skill | — | Full | `framework-version.md` |
 | Conformance suite internals (how it's built) | CONTRIBUTING | — | — | — |
 | Architectural decisions and rationale | CONTRIBUTING | — | — | — |
 | Framework contributor workflow (release, tests) | CONTRIBUTING | — | — | — |
 | Skill installation, scope, when to invoke | README | Full | — | — |
-| Skill self-obsolescence design goal | `author-mcp-app` | Summary | Full | Implicit |
-| Compliance checklist for implementing apps | `author-mcp-app` | — | Full | — |
-| Repository structure for implementing apps | `author-mcp-app` | — | Full | — |
-| Implementing app README skeleton + skeleton rules | `author-mcp-app` | — | Full | — |
-| Implementing app `CONTRIBUTING.md` guidance | `author-mcp-app` | — | Full | — |
-| Test patterns (httpx ASGI walk-throughs) | `author-mcp-app` | Summary | Full | — |
-| Pre-deploy `gitignore` baseline | `author-mcp-app` | — | Full | — |
+| Skill self-obsolescence design goal | `mcp-app` skill | Summary | Full | `app-docs.md` |
+| Compliance checklist for implementing apps | `mcp-app` skill | — | Full | `review-checklist.md` |
+| Repository structure for implementing apps | `mcp-app` skill | — | Full | `authoring.md` |
+| Implementing app README skeleton + skeleton rules | `mcp-app` skill | — | Full | `app-docs.md` |
+| Implementing app `CONTRIBUTING.md` guidance | `mcp-app` skill | — | Full | `app-docs.md` |
+| Test patterns (httpx ASGI walk-throughs) | `mcp-app` skill | Summary | Full | `testing.md` |
+| Pre-deploy `gitignore` baseline | `mcp-app` skill | — | Full | `app-docs.md` |
 
 When changing the SoT for a topic, the change must reach every
 other artifact that carries "Full" or "Summary" treatment in
@@ -249,27 +276,29 @@ Not everything duplicates. These live in exactly one place:
   version bumps) — CONTRIBUTING.md only. Agents authoring
   apps don't need this.
 - **Skill-author guidelines** — a separate cross-cutting skill
-  (`skill-author`). Neither of this repo's skills duplicates
-  those rules; they inherit them.
+  (`skill-author`). This repo's skill doesn't duplicate those
+  rules; it inherits them.
 
 ### Every change touches the docs layer
 
 When reviewing a PR to mcp-app, ask:
 
 1. Does this change affect how app authors integrate, configure,
-   test, or deploy? → `author-mcp-app` skill must be updated.
+   test, or deploy? → the skill's authoring, testing, or
+   runtime-contract reference must be updated.
 2. Does this change affect how operators connect, verify, or
-   manage a deployed instance? → `mcp-app-admin` skill must be
-   updated.
+   manage a deployed instance? → the skill's `operate.md`,
+   `auth.md`, or `troubleshooting.md` must be updated.
 3. Does this change alter the runtime contract, env vars,
    endpoints, or admin API? → Framework README must be updated,
-   and both skills reviewed for the same changes.
+   and the skill reviewed for the same changes.
 4. Does this change introduce or remove a known duplication?
    → Update the table above.
 
-The skills are symlinked into agent skill directories in
-development setups, so edits land live — there's no reason to
-defer a skill update to "after the code change merges."
+Symlinked installs pick up skill edits live, so there's no reason
+to defer a skill update to "after the code change merges." After
+a skill change merges, rebuild the `.skill` bundle and re-save it
+for any Claude account that installed it that way.
 
 ### The test suite is the acceptance criteria
 
@@ -279,7 +308,7 @@ app). If a change breaks a test module in `mcp_app.testing`, it
 breaks every implementing app's test run — that's the point.
 
 For implementing apps, the test suite passing is the definitive
-confirmation that the app is correctly built. The `author-mcp-app`
+confirmation that the app is correctly built. The `mcp-app`
 skill uses this as its final step: adopt the test suite, run it,
 confirm zero failures. If it passes, auth works, admin works,
 tools are wired, identity is enforced.
@@ -722,7 +751,7 @@ Why this shape and not the alternatives:
   every registered tool internally coherent.
 - **Not framework-enforced auto-blocking.** Consistent with "reports facts,
   does not enforce policy": the framework supplies the mechanism; the
-  `author-mcp-app` skill makes following it mandatory for file tools, and the
+  `mcp-app` skill makes following it mandatory for file tools, and the
   default (deny over HTTP unless the author opts a host-path tool into stdio)
   is fail-closed.
 
@@ -1016,11 +1045,15 @@ internals. mcp-app doesn't know about gapp. Neither imports the other.
 
 ### Skill and documentation decoupling
 
-The `author-mcp-app` skill guides agents through building apps on
-this framework. It must remain agnostic to deployment tools. It
+The `mcp-app` skill guides agents through building and operating
+apps on this framework. It must remain agnostic to deployment tools. It
 may mention a deployment tool (e.g., gapp) parenthetically as one
 option among several, but must never contain deployment-tool-specific
-configuration, commands, or workflows. The skill describes the
+configuration or workflows. The one exception is signing-key
+retrieval in `references/auth.md`, which lists how to read the key
+back out of several common stores (a cloud secret manager,
+Terraform, a deployment tool's secret command), because an
+operator can't connect without it. The skill describes the
 app's runtime contract — what it needs from any environment — and
 leaves the deployment tool's skill to handle the rest.
 

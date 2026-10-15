@@ -13,8 +13,15 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 README = REPO / "README.md"
 CONTRIBUTING = REPO / "CONTRIBUTING.md"
-AUTHOR_SKILL = REPO / "skills" / "author-mcp-app" / "SKILL.md"
-ADMIN_SKILL = REPO / "skills" / "mcp-app-admin" / "SKILL.md"
+SKILL_DIR = REPO / "skills" / "mcp-app"
+SKILL = SKILL_DIR / "SKILL.md"
+REFERENCES = SKILL_DIR / "references"
+
+# The six frontmatter keys agentskills.io defines. The Claude app's
+# .skill uploader rejects any other key.
+_ALLOWED_FRONTMATTER_KEYS = {
+    "name", "description", "license", "compatibility", "metadata", "allowed-tools",
+}
 
 
 def _read(path: Path) -> str:
@@ -22,7 +29,7 @@ def _read(path: Path) -> str:
 
 
 def _frontmatter(text: str) -> dict:
-    """Extract YAML frontmatter as a dict. Minimal parser — name+description only."""
+    """Extract YAML frontmatter as a dict. Minimal parser — top-level keys only."""
     if not text.startswith("---"):
         return {}
     end = text.find("\n---", 3)
@@ -41,84 +48,118 @@ def _frontmatter(text: str) -> dict:
     return out
 
 
-# --- README must link to both skills ---
+def _skill_files() -> list[Path]:
+    return [SKILL, *sorted(REFERENCES.glob("*.md"))]
 
-def test_readme_links_to_author_skill():
-    """The README must contain a markdown link to the author-mcp-app skill."""
+
+# --- README must link to the skill ---
+
+def test_readme_links_to_skill():
+    """The README must contain a markdown link to the mcp-app skill."""
     text = _read(README)
-    assert "skills/author-mcp-app/SKILL.md" in text, (
-        "README must contain a link to skills/author-mcp-app/SKILL.md so "
+    assert "skills/mcp-app/SKILL.md" in text, (
+        "README must contain a link to skills/mcp-app/SKILL.md so "
         "humans reading the rendered repo can navigate to the skill."
     )
 
 
-def test_readme_links_to_admin_skill():
-    """The README must contain a markdown link to the mcp-app-admin skill."""
-    text = _read(README)
-    assert "skills/mcp-app-admin/SKILL.md" in text, (
-        "README must contain a link to skills/mcp-app-admin/SKILL.md so "
-        "humans reading the rendered repo can navigate to the skill."
+def test_only_one_skill_ships():
+    """The repo ships exactly one skill; stale copies of merged skills must not linger."""
+    skills = sorted(p.parent.name for p in (REPO / "skills").glob("*/SKILL.md"))
+    assert skills == ["mcp-app"], f"expected only skills/mcp-app, found {skills}"
+
+
+# --- Frontmatter follows the agentskills.io / skill-author rules ---
+
+def test_skill_frontmatter_name_matches_directory():
+    fm = _frontmatter(_read(SKILL))
+    assert fm.get("name") == SKILL_DIR.name, (
+        f"SKILL.md frontmatter `name` must be {SKILL_DIR.name!r}, got {fm.get('name')!r}"
     )
 
 
-# --- Skills must have valid frontmatter ---
-
-def test_author_skill_has_required_frontmatter():
-    fm = _frontmatter(_read(AUTHOR_SKILL))
-    assert fm.get("name") == "author-mcp-app", (
-        f"author-mcp-app/SKILL.md frontmatter `name` must be 'author-mcp-app', got {fm.get('name')!r}"
-    )
-    assert fm.get("description"), (
-        "author-mcp-app/SKILL.md frontmatter must have a non-empty `description`."
+def test_skill_frontmatter_uses_only_standard_keys():
+    fm = _frontmatter(_read(SKILL))
+    extra = set(fm) - _ALLOWED_FRONTMATTER_KEYS
+    assert not extra, (
+        f"SKILL.md frontmatter has non-standard keys {sorted(extra)}; the "
+        ".skill uploader rejects anything outside the six agentskills.io keys."
     )
 
 
-def test_admin_skill_has_required_frontmatter():
-    fm = _frontmatter(_read(ADMIN_SKILL))
-    assert fm.get("name") == "mcp-app-admin", (
-        f"mcp-app-admin/SKILL.md frontmatter `name` must be 'mcp-app-admin', got {fm.get('name')!r}"
+def test_skill_description_fits_limits():
+    desc = _frontmatter(_read(SKILL)).get("description", "")
+    assert desc, "SKILL.md frontmatter must have a non-empty `description`."
+    assert len(desc) <= 1024, f"description is {len(desc)} chars; the limit is 1024."
+    assert not re.search(r"<[^>]*>", desc), (
+        "description must not contain <...> text; the Claude app uploader rejects it."
     )
-    assert fm.get("description"), (
-        "mcp-app-admin/SKILL.md frontmatter must have a non-empty `description`."
+    assert desc.startswith("Use when"), "description should open with 'Use when...'."
+
+
+# --- Progressive disclosure: small entry point, routed references ---
+
+def test_skill_md_stays_small():
+    text = _read(SKILL)
+    lines = text.count("\n")
+    assert lines < 500, f"SKILL.md is {lines} lines; keep it under 500."
+    assert len(text.encode()) < 20_000, (
+        f"SKILL.md is {len(text.encode())} bytes; keep it under ~20 KB (~5k tokens)."
     )
 
 
-# --- Skills must not redirect to the README ---
-# Per CONTRIBUTING.md docs-hygiene rule: skills run in OTHER repos and
-# don't have mcp-app's README in context. "See the README for details"
-# is an anti-pattern that breaks the skill for an agent loaded into a
+def test_references_fit_single_read():
+    """Agents' file reads truncate around 800 lines / 46 KB."""
+    for ref in sorted(REFERENCES.glob("*.md")):
+        text = _read(ref)
+        assert text.count("\n") < 800, f"{ref.name} is over 800 lines; split it."
+        assert len(text.encode()) < 45_000, f"{ref.name} is over 45 KB; split it."
+
+
+def test_every_reference_is_routed_from_skill_md():
+    text = _read(SKILL)
+    for ref in sorted(REFERENCES.glob("*.md")):
+        assert f"`{ref.name}`" in text, (
+            f"references/{ref.name} is not named in SKILL.md's routing table; "
+            "an agent can't find what isn't routed."
+        )
+
+
+def test_reference_mentions_point_at_real_files():
+    """Every `something.md` a skill file names must exist in references/ (or be a repo doc)."""
+    known = {p.name for p in REFERENCES.glob("*.md")} | {
+        "SKILL.md", "README.md", "CONTRIBUTING.md", "CLAUDE.md", "AGENTS.md",
+    }
+    for path in _skill_files():
+        for name in re.findall(r"`([\w.-]+\.md)`", _read(path)):
+            assert name in known, f"{path.name} names `{name}`, which doesn't exist."
+
+
+# --- The skill must not redirect to the README ---
+# Per CONTRIBUTING.md docs-hygiene rule: the skill runs in OTHER repos
+# and doesn't have mcp-app's README in context. "See the README for
+# details" is an anti-pattern that breaks it for an agent loaded into a
 # different repo.
 
 _README_REDIRECT_PATTERNS = [
-    r"see the README\b",
-    r"see the framework README\b",
-    r"see README\.md\b",
-    r"refer to the README\b",
+    r"see the readme\b",
+    r"see the framework readme\b",
+    r"see readme\.md\b",
+    r"refer to the readme\b",
 ]
 
 
-def test_author_skill_does_not_redirect_to_readme():
-    text = _read(AUTHOR_SKILL).lower()
-    for pat in _README_REDIRECT_PATTERNS:
-        assert not re.search(pat, text), (
-            f"author-mcp-app/SKILL.md contains the anti-pattern phrase "
-            f"matching {pat!r}. Skills run in OTHER repos and cannot "
-            f"redirect to mcp-app's README — duplicate the content "
-            f"into the skill instead. (CONTRIBUTING.md → 'Skills must "
-            f"be self-contained'.)"
-        )
-
-
-def test_admin_skill_does_not_redirect_to_readme():
-    text = _read(ADMIN_SKILL).lower()
-    for pat in _README_REDIRECT_PATTERNS:
-        assert not re.search(pat, text), (
-            f"mcp-app-admin/SKILL.md contains the anti-pattern phrase "
-            f"matching {pat!r}. Skills run in OTHER repos and cannot "
-            f"redirect to mcp-app's README — duplicate the content "
-            f"into the skill instead. (CONTRIBUTING.md → 'Skills must "
-            f"be self-contained'.)"
-        )
+def test_skill_does_not_redirect_to_readme():
+    for path in _skill_files():
+        text = _read(path).lower()
+        for pat in _README_REDIRECT_PATTERNS:
+            assert not re.search(pat, text), (
+                f"{path.relative_to(REPO)} contains the anti-pattern phrase "
+                f"matching {pat!r}. The skill runs in OTHER repos and cannot "
+                f"redirect to mcp-app's README — duplicate the content "
+                f"into the skill instead. (CONTRIBUTING.md → 'Skills must "
+                f"be self-contained'.)"
+            )
 
 
 # --- CONTRIBUTING.md must contain the charter ---
@@ -138,12 +179,12 @@ def test_contributing_has_charter_section():
 
 
 def test_contributing_charter_table_is_present():
-    """The charter table must include all three artifact column headers."""
+    """The charter table must include the README, skill, and skill-file columns."""
     text = _read(CONTRIBUTING)
-    assert "| Topic | SoT | README | `author-mcp-app` | `mcp-app-admin` |" in text, (
+    assert "| Topic | SoT | README | `mcp-app` skill | Skill file |" in text, (
         "CONTRIBUTING.md is missing the charter table header row. The "
-        "table must list per-topic SoT for README, author-mcp-app, and "
-        "mcp-app-admin."
+        "table must list per-topic SoT, README and skill treatment, and "
+        "the skill file that holds each topic."
     )
 
 

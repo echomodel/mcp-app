@@ -292,7 +292,7 @@ get_transport()   # "stdio" | "http" | None
 
 The framework **reports** the transport and **honors** `@mcp_transport` at
 registration; it does not otherwise infer which inputs are sensitive — that
-declaration is the tool author's (see the [author-mcp-app skill](skills/author-mcp-app/SKILL.md)).
+declaration is the tool author's (see the [mcp-app skill](skills/mcp-app/SKILL.md)).
 
 ## Environment Variables
 
@@ -1187,130 +1187,108 @@ tool. Your app is correctly built on mcp-app.
 
 ## Skill installation and usage
 
-Two agent skills ship with this repo under `skills/`:
+One agent skill ships with this repo:
+**[`mcp-app`](skills/mcp-app/SKILL.md)**. It guides agents through
+the whole life of an app built on this framework: authoring,
+migration, review, framework upgrades, testing, the deploy
+boundary, and operating a deployed instance (connect, verify,
+users, tokens, MCP client registration, troubleshooting).
 
-- **[`author-mcp-app`](skills/author-mcp-app/SKILL.md)** —
-  guides authoring, migration, review, and framework-upgrade
-  work on mcp-app solutions.
-- **[`mcp-app-admin`](skills/mcp-app-admin/SKILL.md)** — guides
-  operators and agents managing deployed mcp-app instances
-  (connect, verify, users, tokens, MCP client registration).
+The skill follows the [agentskills.io](https://agentskills.io)
+format with progressive disclosure. `SKILL.md` is short: a fit
+check, the rules that hold in every task, the lifecycle, and a
+routing table. Detail lives one level down in
+`skills/mcp-app/references/`, and an agent reads only the file its
+task needs. All auth-model material is isolated in
+`references/auth.md`.
 
-### Installing the skills
+### Installing the skill
 
-Install as symlinks from a local clone so edits in the repo
-go live immediately:
+Use one channel per machine; installing the same skill two ways
+makes it appear twice.
 
 ```bash
-# Claude Code — user scope
-ln -s $(pwd)/skills/author-mcp-app  ~/.claude/skills/author-mcp-app
-ln -s $(pwd)/skills/mcp-app-admin   ~/.claude/skills/mcp-app-admin
+# Claude app (claude.ai, desktop, mobile): save it to your account
+# as a .skill bundle. Build the bundle from a clean checkout:
+cd skills && zip -r ../mcp-app.skill mcp-app -x '*.DS_Store'
+# then open the .skill file with the Claude desktop app, or save it from a
+# file card in a Claude conversation.
+# Skills saved to the account also reach the desktop app's Code tab.
 
-# Antigravity CLI (agy) — symlink into its skills folder. Run from inside
+# Claude Code CLI, user scope: symlink from a local clone so edits
+# go live immediately
+ln -s $(pwd)/skills/mcp-app ~/.claude/skills/mcp-app
+
+# Antigravity CLI (agy): symlink into its skills folder. Run from inside
 # that folder with a path relative to it, so the link holds no absolute path:
 cd ~/.gemini/config/skills
-ln -s <relative-path-to-clone>/skills/author-mcp-app author-mcp-app
-ln -s <relative-path-to-clone>/skills/mcp-app-admin  mcp-app-admin
+ln -s <relative-path-to-clone>/skills/mcp-app mcp-app
+
+# Gemini CLI
+gemini skills link <path-to-clone>/skills/mcp-app
 ```
 
-Install method may vary by agent platform; follow the
-established pattern in your environment.
+### When it activates
 
-### When to invoke
+The description is deliberately broad: it fires on most work on an
+MCP server project, and on symptoms such as a 401 or tools not
+listed. The first thing the skill does is check fit. It steps aside
+silently for non-Python servers, stdio-only servers with no hosting
+plans, client-side configuration, and projects on another framework
+when no migration or major new scope is in play. It continues for
+apps already on mcp-app, for new servers, and for major new scope
+such as adding hosting, multi-user, or auth.
 
-**`author-mcp-app`** is for lifecycle events on a solution
-repo, not for steady-state work:
+### Design goal: the solution repo outgrows the skill
 
-- **Initial authoring** of a new mcp-app solution (greenfield).
-- **Periodic review** of an existing solution against the
-  current framework — produces a compliance dashboard.
-- **Framework upgrades** or migrations to adopt new features
-  or replace deprecated patterns.
+Authoring, reviewing, upgrading, deploying, redeploying, and
+administering recur for the life of an app; that work never becomes
+obsolete. What *can* become unnecessary, per solution repo, is the
+skill. An authoring or review pass must leave the solution repo's
+own `README.md`, `CONTRIBUTING.md`, and agent context files
+(`CLAUDE.md`, `AGENTS.md`) carrying the complete process, authoring
+and operating, in the app's real CLI names, real profile fields, and
+real deployment posture.
 
-**`mcp-app-admin`** is for operational work on a deployed
-instance — connecting the admin CLI, verifying the
-deployment, managing users, rotating credentials, registering
-MCP clients. Invoke it alongside whatever deployment-tool
-skill (if any) is in use.
+After that pass, an agent opening the solution repo with **no skill
+loaded** must be able to install, run, deploy, redeploy, connect the
+admin CLI, manage users, rotate credentials, register MCP clients,
+add or modify tools, and run tests from the repo's own files.
 
-### Design goal: self-obsolescence for the solution repo
-
-The processes these skills describe — authoring, reviewing,
-upgrading, deploying, redeploying, administering — are all
-inherently recurring. The admin process in particular runs
-continuously across the lifetime of a deployed app
-(redeploys, user additions, credential rotations, client
-registrations). That work never becomes obsolete.
-
-What *can* become obsolete, per solution repo, are the
-**skills as agent-guidance artifacts**. `author-mcp-app` is
-designed — when `mcp-app-admin` and any other relevant
-accelerator skills are available in the environment at
-authoring time — to absorb their guidance into the solution
-repo's own `README.md`, `CONTRIBUTING.md`, and agent context
-files (`CLAUDE.md`, `AGENTS.md`) in app-specific
-and often more concrete terms than the skills themselves can
-offer. The solution repo's docs end up carrying the complete
-end-to-end process — authoring AND operating — expressed in
-the app's real CLI names, real profile fields, real
-deployment posture.
-
-Once the author skill has completed that pass, a future
-agent opening the solution repo with **neither skill loaded**
-must be able to install, run, deploy, redeploy, connect the
-admin CLI, manage users, rotate credentials, register MCP
-clients, add or modify tools, and run tests, entirely from
-the repo's own files. Neither skill is needed for ongoing
-work on that specific repo.
-
-The skills remain broadly useful:
-
-- **`author-mcp-app`** — for lifecycle events on any repo
-  (initial authoring, periodic review, framework upgrade),
-  or on repos that haven't been brought under this discipline
-  yet.
-- **`mcp-app-admin`** — for operational work on instances
-  whose repos don't have the admin journey fully documented
-  (legacy apps, third-party apps, or any solution that
-  skipped the author skill's pass), and as a cross-cutting
-  reference that tracks framework evolution before any one
-  repo's docs catch up.
-
-The bar the author skill holds itself to: if it ran on this
-repo successfully, neither skill should be required the next
-time someone (human or agent) opens the repo to do normal
-work on it.
+The skill stays useful for lifecycle events on any repo, for repos
+not yet brought under this discipline, for operating instances whose
+repos don't document the admin journey, and as a reference that
+tracks framework changes before any one repo's docs catch up.
 
 ### The three-stage lifecycle and where deployment fits
 
 An mcp-app solution moves through three stages from working
 tree to operating service:
 
-1. **Author** — write, structure, and locally validate the
-   solution's code. Owned by `author-mcp-app`.
-2. **Deploy** — turn the validated working tree into a
-   reachable URL that passes a minimal health check (`GET
-   /health` returns `{"status": "ok"}`). **Owned by neither
-   mcp-app skill.** This is intentionally external. The
-   *operator* — the human running the deploy, or the agent
-   environment standing in for them — chooses the route,
-   using whatever deployment tooling, skills, plugins,
+1. **Author**: write, structure, and locally validate the
+   solution's code. Covered by the skill.
+2. **Deploy**: turn the validated working tree into a reachable
+   URL whose `GET /health` reports `healthy` or `degraded`.
+   **Not owned by mcp-app or its skill.** This is intentionally
+   external. The *operator* (the human running the deploy, or
+   the agent environment standing in for them) chooses the
+   route, using whatever deployment tooling, skills, plugins,
    scripts, or context that environment brings. A solution
    *may* prescribe a particular mechanism (e.g., a Dockerfile
    plus opinionated CI workflows in the repo), but it need
    not, and echomodel first-party solutions deliberately do
-   not. The mcp-app skills require only that this stage
-   exists in some form and yields a healthy URL.
-3. **Operate** — connect the admin CLI, verify the deployment
+   not. The skill requires only that this stage exists in some
+   form and yields a healthy URL.
+3. **Operate**: connect the admin CLI, verify the deployment
    end-to-end, manage users, rotate credentials, register MCP
-   clients, troubleshoot. Owned by `mcp-app-admin`. Assumes
-   stage 2 already produced a healthy URL.
+   clients, troubleshoot. Covered by the skill. Assumes stage 2
+   already produced a healthy URL.
 
 **Where stage-2 guidance comes from.** Because mcp-app
 deliberately does not own the deploy step, an agent reaching
 the author → deploy boundary looks for guidance in (in order):
 
-1. **The operator's agent environment** — a deployment skill
+1. **The operator's agent environment**: a deployment skill
    or plugin loaded for the cloud platform, container
    orchestrator, or deployment automation the operator uses;
    any global or user-level context (e.g., agent context
@@ -1318,7 +1296,7 @@ the author → deploy boundary looks for guidance in (in order):
    solutions. This is the primary source for solutions that
    don't prescribe deployment, and it's where first-party
    echomodel deployments live.
-2. **The solution's own repo** — if the app prescribes a
+2. **The solution's own repo**: if the app prescribes a
    deployment route, it documents that in `CONTRIBUTING.md`,
    `CLAUDE.md`, `README.md`, or via in-repo scripts with
    documented usage. Most solutions don't and shouldn't, but
@@ -1330,37 +1308,34 @@ the author → deploy boundary looks for guidance in (in order):
    environment has not been set up for agent-driven deploys
    on this solution, and the user must direct the next step.
 
-The guidance — wherever it comes from — must let the agent:
+The guidance, wherever it comes from, must let the agent:
 
 - Initiate or trigger deployment with the chosen tooling.
 - Discover the URL of an existing or freshly-produced
   deployment.
-- Confirm the URL passes the minimal `/health` check before
-  handing off to `mcp-app-admin`.
+- Confirm the URL passes the `/health` check before moving
+  on to the operate stage.
 
-**Implementing apps should recommend installing both
-mcp-app skills, and pairing with a deployment route.** A
-short footer in the app's README pointing at
-`author-mcp-app`, `mcp-app-admin`, and a note that the
-operator's environment must supply a deployment route (a
-skill, a plugin, or documented manual steps) tells a
-returning operator how the lifecycle is meant to fit
-together. The skills themselves are not prerequisites — the
-app's docs must be self-sufficient — but when both skills are
-loaded *and* a deployment route is arranged, the agent moves
-through the lifecycle with much less prompting.
+**Implementing apps should recommend the skill and pair it with
+a deployment route.** A short footer in the app's README pointing
+at the `mcp-app` skill, plus a note that the operator's
+environment must supply a deployment route (a skill, a plugin,
+or documented manual steps), tells a returning operator how the
+lifecycle fits together. The skill is not a prerequisite (the
+app's docs must be self-sufficient), but when it is loaded *and*
+a deployment route is arranged, the agent moves through the
+lifecycle with much less prompting.
 
 **Why this split.** mcp-app aspires to a clean separation:
 the framework opinions stop at the runtime contract, and
 deployment opinions live with the operator. Folding the
-deploy step into either skill would couple the framework to a
+deploy step into the skill would couple the framework to a
 specific deployment posture, defeating the agnostic-by-default
-goal — and pushing it onto each implementing app would force
+goal, and pushing it onto each implementing app would force
 every solution to carry deployment opinions it doesn't
-otherwise need. The skills coordinate the boundaries
-(`author-mcp-app` decides when authoring is "done";
-`mcp-app-admin` decides what counts as a verified operating
-instance) but neither owns what happens between them.
+otherwise need. The skill decides when authoring is "done" and
+what counts as a verified operating instance, but it doesn't own
+what happens between them.
 
 ## Further Reading
 
