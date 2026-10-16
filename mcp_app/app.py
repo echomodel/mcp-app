@@ -19,7 +19,8 @@ from functools import cached_property
 from types import ModuleType
 
 import click
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Mount, Route
@@ -288,20 +289,25 @@ class App:
         mcp_app._store = store
         mcp_app._transport = "http"
 
-        self._mcp = FastMCP(
-            self.name,
-            stateless_http=True,
-            json_response=True,
-            streamable_http_path="/",
-        )
-        self._mcp.settings.transport_security.enable_dns_rebinding_protection = False
+        self._mcp = MCPServer(self.name)
         for func in _discover_tools(self._discovered_modules, "http"):
             self._mcp.tool()(_require_identity(func))
 
         auth_store = DataStoreAuthAdapter(store)
         verifier = JWTVerifier(auth_store)
         admin_app = create_admin_app(auth_store, safe_tool=self.safe_tool)
-        inner = self._mcp.streamable_http_app()
+        # Transport parameters live on streamable_http_app() in SDK 2.x.
+        # DNS-rebinding protection is off: the service sits behind a
+        # platform load balancer and is addressed by many Host values;
+        # identity comes from the bearer token, not the Host header.
+        inner = self._mcp.streamable_http_app(
+            streamable_http_path="/",
+            json_response=True,
+            stateless_http=True,
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            ),
+        )
 
         if self.middleware is None:
             wrapped = JWTMiddleware(inner, verifier)
@@ -362,7 +368,7 @@ class App:
         mcp_app._store = store
         mcp_app._transport = "stdio"
 
-        mcp = FastMCP(self.name)
+        mcp = MCPServer(self.name)
         for func in _discover_tools(self._discovered_modules, "stdio"):
             mcp.tool()(_require_identity(func))
 

@@ -8,7 +8,7 @@ in `review-checklist.md`.
 
 Contents: framework choice · greenfield: local or remote · migrating an
 existing app · repository structure · MCP server setup (tool discovery,
-host-path safety, SDK shapes, safe tool, extra HTTP routes, plain FastMCP)
+host-path safety, SDK shapes, safe tool, extra HTTP routes, plain MCPServer)
 
 ## Framework choice
 
@@ -17,14 +17,15 @@ Two approaches are supported:
 ### Recommended: mcp-app (config-driven)
 
 [mcp-app](https://github.com/echomodel/mcp-app) is a framework that
-wraps FastMCP and Starlette. You define tools as plain async functions,
+wraps the official MCP Python SDK's `MCPServer` (SDK 2.x) and Starlette.
+You define tools as plain async functions,
 wire up with two lines in Python, and run with one command. No config
 files, no framework imports in your tool code.
 
 **What the user gets with mcp-app:**
 
 - **Zero framework code in tools.** Tools are plain async functions.
-  No decorators, no FastMCP imports, no framework coupling in
+  No decorators, no MCP SDK imports, no framework coupling in
   business code. mcp-app discovers public async functions from the
   module passed as `tools_module` and registers them automatically —
   function names become tool names, docstrings become descriptions,
@@ -77,16 +78,16 @@ files, no framework imports in your tool code.
 dependencies = ["mcp-app @ git+https://github.com/echomodel/mcp-app.git@vX.Y.Z"]
 ```
 
-### Alternative: FastMCP (manual wiring)
+### Alternative: MCPServer (manual wiring)
 
-If the user prefers direct control, already has a FastMCP-based
-app, or has requirements that mcp-app doesn't cover, use FastMCP
-directly with the `mcp` package. The architecture rules (SDK-first,
+If the user prefers direct control, already has an app on the SDK's
+`MCPServer` (or 1.x `FastMCP`), or has requirements that mcp-app
+doesn't cover, use `MCPServer` directly with the `mcp` package. The architecture rules (SDK-first,
 thin tools, XDG paths) apply equally to both approaches.
 
-**When to suggest FastMCP directly:**
+**When to suggest MCPServer directly:**
 - User explicitly asks for it
-- Existing codebase already uses FastMCP and migration isn't wanted
+- Existing codebase already uses MCPServer and migration isn't wanted
 - Need for custom transport or protocol extensions
 - stdio-only tool with no deployment plans
 - User wants full control over the ASGI middleware stack
@@ -111,7 +112,7 @@ Based on this, the solution targets stdio only (simpler — no auth,
 no deployment) or stdio + HTTP (needs auth, deployment planning).
 Both follow the same repo structure. A stdio-only server with no store, no
 identity needs, and no plans for HTTP may not need mcp-app at all: plain
-FastMCP is simpler (see the end of this file). Say so and let the user
+plain MCPServer is simpler (see the end of this file). Say so and let the user
 choose.
 
 ## Migrating an existing app
@@ -597,16 +598,16 @@ clients that can't perform an out-of-band fetch) still use an
 inline content block / base64 argument. The data-plane routes are
 the large-payload path, not a replacement for inline.
 
-### With FastMCP (alternative)
+### With MCPServer (alternative)
 
 ```python
 # my_solution/mcp/server.py
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from my_solution import APP_NAME
 from my_solution.sdk.core import MySDK
 
-mcp = FastMCP(APP_NAME, stateless_http=True, json_response=True)
-mcp.settings.transport_security.enable_dns_rebinding_protection = False
+mcp = MCPServer(APP_NAME)
 
 sdk = MySDK()
 
@@ -615,7 +616,13 @@ async def do_thing(param: str) -> dict:
     """Do the thing."""
     return sdk.do_thing(param)
 
-app = mcp.streamable_http_app()  # For uvicorn HTTP mode
+app = mcp.streamable_http_app(  # For uvicorn HTTP mode
+    stateless_http=True,
+    json_response=True,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    ),
+)
 
 def run_server():
     mcp.run()             # For stdio mode

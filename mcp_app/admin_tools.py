@@ -6,12 +6,12 @@ Run via: mcp-app admin-tools
 
 from datetime import datetime, timezone
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcp_app.admin_client import RemoteAuthAdapter
 from mcp_app.models import UserAuthRecord
 
-mcp = FastMCP("mcp-app-admin")
+mcp = MCPServer("mcp-app-admin")
 
 
 @mcp.tool()

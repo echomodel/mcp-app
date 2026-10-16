@@ -10,6 +10,19 @@ the installed version is current before proceeding. Check how
 the dependency is declared (e.g., in `pyproject.toml`) and
 whether it pins a specific version or commit.
 
+## Release lines
+
+| mcp-app | MCP Python SDK | Auth model |
+|---|---|---|
+| `v1.0.0` (last of the 1.x line) | `mcp>=1,<2` (`FastMCP`) | Shared `SIGNING_KEY`, self-issued user tokens |
+| `v2.x` | `mcp>=2,<3` (`MCPServer`) | Standard MCP OAuth (phased in; see the app's README) |
+
+An app pinned to `v1.0.0` must not also pin `mcp>=2`; an app on `v2.x`
+must not pin `mcp<2`. mcp-app's own `pyproject.toml` carries the SDK
+bound for its line, so an app that only pins `mcp-app` gets the right
+SDK automatically. Moving an app from 1.x to 2.x is a deliberate
+upgrade, not a routine pin bump.
+
 ## Pin discipline (mandatory)
 
 Every mcp-app solution app's `pyproject.toml` MUST pin

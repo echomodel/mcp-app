@@ -22,7 +22,7 @@ entry points, and which transports it serves.
 - **Already built on mcp-app** (depends on `mcp-app`, has `App(...)`):
   fit. Continue.
 - **Not Python:** not a fit.
-- **On another framework** (standalone FastMCP, the low-level `mcp` SDK, a
+- **On another framework** (standalone `MCPServer`/FastMCP, the low-level `mcp` SDK, a
   TypeScript SDK) **and the conversation has no migration, refactor, or
   major new scope:** not a fit.
 - **stdio-only, single user, no hosting plans in view:** not a fit. A

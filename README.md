@@ -6,7 +6,7 @@ with one command.
 
 ## Why mcp-app
 
-FastMCP is great for quickly spinning up a local tool. But as soon
+The MCP SDK's `MCPServer` is great for quickly spinning up a local tool. But as soon
 as you want to productize it, share it with others, or use it across
 multiple identities, you end up building auth, user management, admin
 endpoints, and deployment config into each app. They all invariably
@@ -1133,15 +1133,15 @@ all Claude clients — web, mobile, and Claude Code.
 
 ## Architecture
 
-mcp-app wraps [FastMCP](https://github.com/modelcontextprotocol/python-sdk) (the official MCP Python SDK) and [Starlette](https://www.starlette.io/) (ASGI framework). Solutions never import these directly — mcp-app handles all wiring.
+mcp-app wraps `MCPServer` from the [official MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) (2.x; the class was named `FastMCP` in SDK 1.x) and [Starlette](https://www.starlette.io/) (ASGI framework). Solutions never import these directly — mcp-app handles all wiring.
 
 ```
 App(name="my-app", tools_module=tools)
     → discovers async functions in tools module
-    → registers each as FastMCP tool (with identity enforcement)
+    → registers each as an MCPServer tool (with identity enforcement)
     → creates data store from app name
     → HTTP (serve): wraps with identity middleware + admin endpoints → uvicorn
-    → stdio (--user): loads user record from store → FastMCP over stdin/stdout
+    → stdio (--user): loads user record from store → MCPServer over stdin/stdout
 ```
 
 ## Free Tests for Your App

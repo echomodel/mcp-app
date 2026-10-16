@@ -235,7 +235,7 @@ Legend for the per-artifact columns:
 | Troubleshooting decision tree and symptom table | `mcp-app` skill | — | Full | `troubleshooting.md` |
 | MCP client configuration (stdio + HTTP examples) | README | Full | Full | `operate.md` (stdio), `auth.md` (HTTP) |
 | `register` command output handling | README | Full | Full | `operate.md`, `app-docs.md` |
-| Architecture (FastMCP+Starlette wrap, ASGI) | README | Full | Pointer | `authoring.md` |
+| Architecture (MCPServer+Starlette wrap, ASGI) | README | Full | Pointer | `authoring.md` |
 | Extra routes / custom data plane (`App.extra_routes`) | README | Full | Summary | `authoring.md` |
 | Free tests / conformance suite (how to adopt) | README | Full | Full | `testing.md` |
 | Agent evals of tool descriptions | `mcp-app` skill | — | Full | `agent-evals.md` |
@@ -766,7 +766,7 @@ mean committing user choices to version control.
 
 A config-driven framework for building and running MCP servers as HTTP
 services (and eventually stdio). Solutions define tools as pure Python
-functions. The framework handles everything else: FastMCP setup, tool
+functions. The framework handles everything else: MCPServer setup, tool
 discovery, middleware, auth, admin endpoints, data stores, and serving.
 
 ### Core principle: zero framework imports in tool code
@@ -814,7 +814,7 @@ changes. Same yaml, same tools module, same SDK.
 ### HTTP mode (`mcp-app serve`)
 
 The full production stack:
-- FastMCP wrapped with identity middleware (runs by default)
+- MCPServer wrapped with identity middleware (runs by default)
 - Admin REST endpoints at `/admin`
 - `current_user` set by verifier: full user record (auth + profile) in one store read
 - uvicorn runs internally (port 8080 by default)
@@ -823,19 +823,19 @@ The full production stack:
 ### stdio mode (`mcp-app stdio`)
 
 Local single-user mode:
-- FastMCP runs over stdin/stdout
+- MCPServer runs over stdin/stdout
 - No middleware, no admin endpoints, no ASGI layer
 - `current_user` loaded from store using `--user` flag
 - Store still wired — `get_store()` works the same way
 - Tool discovery identical to HTTP — same module, same functions
 
 **Why mcp-app matters for stdio:** Without it, solutions that want stdio
-must use FastMCP directly with `@mcp.tool()` decorators and manual setup.
+must use MCPServer directly with `@mcp.tool()` decorators and manual setup.
 With `mcp-app stdio`, the same yaml-driven tool discovery works for both
 transports. One build, two commands.
 
-**When raw FastMCP is fine for stdio:** If the solution is stdio-only, has
-no store, no identity concerns, and no plans for HTTP — raw FastMCP with
+**When raw MCPServer is fine for stdio:** If the solution is stdio-only, has
+no store, no identity concerns, and no plans for HTTP — raw MCPServer with
 decorators is simpler. mcp-app adds value when the solution needs both
 transports or uses the store/identity infrastructure.
 
@@ -946,20 +946,20 @@ The identity middleware handles authentication (who is this user?). The
 SDK handles authorization and credential usage (what can this user do?
 what backend token do they have?).
 
-### Why pure ASGI middleware, not FastMCP's built-in auth
+### Why pure ASGI middleware, not the SDK's built-in auth
 
-FastMCP provides `TokenVerifier`, `BearerAuthBackend`, and `ctx.client_id`.
-We rejected these because:
+The SDK's `MCPServer` provides `TokenVerifier`, `BearerAuthBackend`, and
+`get_access_token()`. We rejected these because:
 
-- It couples the framework to FastMCP — mcp-app should work with any ASGI
+- It couples the framework to MCPServer — mcp-app should work with any ASGI
   app
-- `ctx.client_id` is only available inside MCP tool functions, not in the
+- The access token is only available inside MCP tool functions, not in the
   SDK layer
-- The SDK would need to import FastMCP or bridge from `ctx.client_id` to a
-  ContextVar per tool function
+- The SDK would need to import the MCP SDK or bridge from its access token
+  to a ContextVar per tool function
 
 Pure ASGI middleware owns the ContextVar and sets it before any app code
-runs. The SDK reads it. No bridging. No FastMCP imports in the SDK.
+runs. The SDK reads it. No bridging. No MCP SDK imports in the SDK.
 
 ### Two app patterns — same middleware, different SDK behavior
 

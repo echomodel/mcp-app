@@ -39,9 +39,11 @@ ready to deploy?"
 - [ ] Considered declaring a `SafeTool` for end-to-end smoke testing,
       or made a deliberate decision to opt out
 
-### MCP Server (FastMCP — if not using mcp-app)
-- [ ] Uses `mcp` package (FastMCP) with `stateless_http=True`
-- [ ] DNS rebinding protection disabled for Cloud Run
+### MCP Server (plain MCPServer — if not using mcp-app)
+- [ ] Uses the `mcp` package 2.x (`MCPServer`) with `stateless_http=True`
+      passed to `streamable_http_app()`
+- [ ] DNS rebinding protection disabled (`transport_security=`) for a
+      load-balanced host
 - [ ] `mcp.run()` for stdio, `app` variable for HTTP (uvicorn)
 
 ### User Identity and Profile
