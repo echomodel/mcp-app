@@ -175,6 +175,9 @@ The outcomes a client sees:
   The identity is established; the service just isn't open to it.
 - **Valid token, registered email** → the request runs with
   `current_user` set, exactly as in shared-secret mode.
+- **Valid token, email in `ADMIN_EMAILS`** → admitted even if not yet
+  registered; the record is created on first sign-in. This is how a
+  fresh deployment bootstraps without `users add`.
 
 What the operator configures at the issuer: an API (its identifier
 becomes `AUTH_AUDIENCE`), dynamic client registration or client ID
@@ -357,6 +360,7 @@ declaration is the tool author's (see the [mcp-app skill](skills/mcp-app/SKILL.m
 | `MCP_RESOURCE_URL` | With `AUTH_ISSUER` | Startup fails | Public URL of this server, as clients type it; published as the protected resource |
 | `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (namespaced issuers: the full claim name) |
 | `AUTH_JWKS_URI` | No | OpenID discovery | Where to fetch the issuer's signing keys |
+| `ADMIN_EMAILS` | For OAuth mode | No administrators | Comma-separated emails that may call `/admin`; each is also admitted as a user on first sign-in |
 | `SIGNING_KEY` | For HTTP in shared-secret mode | Startup fails | JWT signing key |
 | `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim (shared-secret mode) |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
@@ -583,19 +587,27 @@ Refuses to start without `--user`.
 
 REST admin endpoints are mounted at `/admin` in HTTP mode:
 
-- `POST /admin/users` — register user (with optional profile), returns JWT
+- `POST /admin/users` — register user (with optional profile); returns a
+  JWT in shared-secret mode, `{"email", "registered": true}` in OAuth mode
 - `GET /admin/users` — list users
 - `GET /admin/users/{email}/profile` — read a user's profile
 - `PATCH /admin/users/{email}/profile` — merge fields into a user's profile
 - `DELETE /admin/users/{email}` — revoke user
-- `POST /admin/tokens` — issue new token for existing user
+- `POST /admin/tokens` — issue new token for existing user (shared-secret
+  mode only; `409` in OAuth mode, where the authorization server issues tokens)
 - `GET /admin/safe-tool` — return the deployment's safe-tool declaration
   (or a structured "not declared" envelope)
 - `GET /admin/health` — full health diagnostic detail (paths, fs_type,
   free bytes, mount source) that the public `/health` intentionally
   omits. See [Health endpoint](#health-endpoint).
 
-Gated by admin-scoped JWT (`scope: "admin"`, same signing key).
+Gated by the deployment's auth mode: in shared-secret mode an
+admin-scoped JWT (`scope: "admin"`, same signing key); in OAuth mode
+the identity provider's token for an email listed in `ADMIN_EMAILS`.
+Admin is membership in that variable, nothing stored and no promotion
+path; changing the set is a redeploy. The admin CLI does not yet sign
+in to an OAuth-mode deployment, so `/admin` there is reached with a
+bearer token obtained from the identity provider.
 
 ### Safe tool
 

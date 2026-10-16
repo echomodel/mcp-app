@@ -17,6 +17,7 @@ deployment to the operator's tooling. This file is that contract.
 | `MCP_RESOURCE_URL` | With `AUTH_ISSUER` | Startup fails | Public URL of this server as users type it (`auth.md`) |
 | `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (`auth.md`) |
 | `AUTH_JWKS_URI` | No | OpenID discovery | Issuer key set location (`auth.md`) |
+| `ADMIN_EMAILS` | For OAuth mode | No administrators | Emails allowed on `/admin`, admitted as users on first sign-in (`auth.md`) |
 | `SIGNING_KEY` | For HTTP, shared-secret mode | Startup fails | JWT signing key (`auth.md`) |
 | `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim, shared-secret mode (`auth.md`) |
 | `TOKEN_DURATION_SECONDS` | No | ~10 years | Token lifetime (`auth.md`) |

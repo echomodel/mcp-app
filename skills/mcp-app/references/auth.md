@@ -43,6 +43,7 @@ auth at all: whoever can launch the process is the user named by `--user`.
 | `MCP_RESOURCE_URL` | With `AUTH_ISSUER` | Startup fails | Public URL of this server, as users type it, trailing slash included |
 | `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email; namespaced issuers need the full name (e.g. `https://example.com/email`) |
 | `AUTH_JWKS_URI` | No | OpenID discovery | Issuer key set location, if discovery is unavailable |
+| `ADMIN_EMAILS` | For OAuth mode | No administrators | Comma-separated emails allowed on `/admin`; each is admitted as a user on first sign-in |
 | `SIGNING_KEY` | For HTTP, shared-secret mode | Startup fails | JWT signing key. No default. |
 | `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim (shared-secret mode) |
 | `TOKEN_DURATION_SECONDS` | No | 315360000 (~10yr) | Lifetime of newly issued tokens (shared-secret mode) |
@@ -260,6 +261,7 @@ sets `current_user`.
 | No token, or invalid (bad signature, wrong `iss`/`aud`, expired, no email claim) | `401` + `WWW-Authenticate: Bearer error="invalid_token", ..., resource_metadata="<MCP_RESOURCE_URL>/.well-known/oauth-protected-resource"` | Authenticate. A standard client follows the pointer, learns the issuer, runs the flow |
 | Valid token, email not registered | `403`, no challenge | Identity established; not admitted. Register the user; re-authenticating cannot help |
 | Valid token, registered email | Normal MCP response | `current_user` set |
+| Valid token, email in `ADMIN_EMAILS`, not registered | Normal MCP response; record created | Operator bootstrap; no `users add` needed |
 | `GET /.well-known/oauth-protected-resource` | `200` `{"resource", "authorization_servers": [issuer], "bearer_methods_supported": ["header"]}` | Public discovery document, built by the MCP SDK |
 
 **The user journey:** the user enters `MCP_RESOURCE_URL` in their MCP
@@ -285,11 +287,20 @@ and comes back with a token. mcp-app sees only the token.
    tokens when the client sends `resource` rather than `audience`, set it
    to the API identifier.
 
-**Admin surface in this mode.** `/admin` still authenticates with the
-shared-secret admin JWT until the admin cutover lands; a deployment in
-OAuth mode therefore still sets `SIGNING_KEY` for `/admin`, and `tokens
-create` mints tokens no client will use. Register users with `users add`
-exactly as before; the token it prints is irrelevant in OAuth mode.
+**Admin surface in this mode.** Admin is membership in `ADMIN_EMAILS`:
+`/admin` accepts the identity provider's token when its email claim is in
+that set. Nothing is stored, there is no promotion path, and changing the
+set is a redeploy. No `SIGNING_KEY` is needed anywhere. `POST /admin/users`
+returns `{"email", "registered": true}` (no token); `POST /admin/tokens`
+returns `409`, because the authorization server issues tokens. An email in
+`ADMIN_EMAILS` is also admitted as a user on its first sign-in, so a fresh
+deployment needs no `users add` for the operator.
+
+The admin CLI does not yet sign in to an OAuth-mode deployment (`connect
+<url>` still expects a signing key), so for now `/admin` on such a
+deployment is driven with a bearer token from the identity provider, or
+users are added through the same mechanism a later release wraps in
+framework admin tools.
 
 **Testing without an issuer.** `OAuthResourceServer(..., jwks={"keys": [...]})`
 takes a static key set, so a test can sign tokens with a generated RSA key

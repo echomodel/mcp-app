@@ -417,3 +417,101 @@ async def test_verify_token_satisfies_sdk_protocol(env, keys):
     assert access.client_id == "alice@example.com"
     assert access.subject == "google-oauth2|12345"
     assert await verifier.verify_token(_token(keys["pem"], email="nobody@example.com")) is None
+
+
+# -- admin surface in OAuth mode ------------------------------------------------
+
+
+@pytest.fixture
+def admin_env(env, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", "Owner@Example.com, second@example.com")
+    monkeypatch.delenv("SIGNING_KEY", raising=False)  # no shared secret anywhere
+    return env
+
+
+@pytest.fixture
+def admin_app(admin_env, keys):
+    from fixture_app import tools
+
+    return App(
+        name="oauth-test",
+        tools_module=tools,
+        auth=OAuthResourceServer(
+            issuer=ISSUER, audience=AUDIENCE, resource_url=RESOURCE, jwks=keys["jwks"]
+        ),
+    )
+
+
+@pytest.fixture
+def admin_client(admin_app):
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=admin_app), base_url="https://mcp.test")
+
+
+@pytest.mark.asyncio
+async def test_oauth_mode_starts_without_signing_key(admin_client):
+    assert (await admin_client.get("/health")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_admin_email_token_reaches_admin_endpoints(admin_client, keys):
+    headers = {"Authorization": f"Bearer {_token(keys['pem'], email='owner@example.com')}"}
+    created = await admin_client.post("/admin/users", json={"email": "alice@example.com"}, headers=headers)
+    assert created.status_code == 200
+    assert created.json() == {"email": "alice@example.com", "registered": True}
+    listed = await admin_client.get("/admin/users", headers=headers)
+    assert listed.status_code == 200
+    assert [u["email"] for u in listed.json()] == ["alice@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_non_admin_email_is_forbidden_on_admin_endpoints(admin_client, keys):
+    await _register("alice@example.com")
+    headers = {"Authorization": f"Bearer {_token(keys['pem'], email='alice@example.com')}"}
+    assert (await admin_client.get("/admin/users", headers=headers)).status_code == 403
+    assert (await admin_client.get("/admin/users")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_shared_secret_admin_token_is_refused_in_oauth_mode(admin_client):
+    legacy = pyjwt.encode(
+        {"sub": "admin", "scope": "admin", "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+        "some-old-signing-key-32-chars-long!!",
+        algorithm="HS256",
+    )
+    resp = await admin_client.get("/admin/users", headers={"Authorization": f"Bearer {legacy}"})
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_token_issuance_is_refused_in_oauth_mode(admin_client, keys):
+    await _register("alice@example.com")
+    headers = {"Authorization": f"Bearer {_token(keys['pem'], email='owner@example.com')}"}
+    resp = await admin_client.post("/admin/tokens", json={"email": "alice@example.com"}, headers=headers)
+    assert resp.status_code == 409
+    assert resp.json()["error"] == "tokens_not_issued_here"
+
+
+@pytest.mark.asyncio
+async def test_admin_email_is_admitted_as_a_user_on_first_sign_in(admin_app, admin_client, keys):
+    """ADMIN_EMAILS bootstraps a fresh deployment: no `users add` for the operator."""
+    headers = {**MCP_HEADERS, "Authorization": f"Bearer {_token(keys['pem'], email='owner@example.com')}"}
+    async with _mcp_running(admin_app, admin_client):
+        resp = await admin_client.post("/", json=_rpc("tools/list"), headers=headers)
+    assert resp.status_code == 200
+    store = DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test"))
+    assert (await store.get("owner@example.com")) is not None
+
+
+@pytest.mark.asyncio
+async def test_non_admin_unknown_email_is_still_403(admin_client, keys):
+    headers = {**MCP_HEADERS, "Authorization": f"Bearer {_token(keys['pem'], email='stranger@example.com')}"}
+    assert (await admin_client.post("/", json=_rpc("tools/list"), headers=headers)).status_code == 403
+
+
+def test_admin_emails_parsing(monkeypatch):
+    from mcp_app.auth import admin_emails
+
+    monkeypatch.setenv("ADMIN_EMAILS", " A@x.io ,,b@y.io,")
+    assert admin_emails() == frozenset({"a@x.io", "b@y.io"})
+    monkeypatch.delenv("ADMIN_EMAILS")
+    assert admin_emails() == frozenset()

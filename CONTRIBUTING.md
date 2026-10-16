@@ -653,6 +653,14 @@ middleware for two reasons:
   reads it identically whichever mode a deployment runs. Nothing below
   the middleware knows which mode is in force.
 
+Admin follows the same split. `create_admin_app` takes an `AdminAuth`
+strategy: `SharedSecretAdminAuth` (HS256 admin JWT, issues user tokens)
+or `OAuthAdminAuth` (the provider's token, email in `ADMIN_EMAILS`, issues
+nothing). Admin is membership in that env var and nothing else: no role in
+the store, no promotion path, a redeploy to change it. An admin email is
+admitted as a user on first sign-in so a deployment bootstraps with no
+shared secret and no `users add`.
+
 `OIDCTokenVerifier` nevertheless implements the SDK's `TokenVerifier`
 protocol, so an app that wants the SDK's middleware instead can hand it
 over unchanged. Verification is PyJWT against the issuer's JWKS, with

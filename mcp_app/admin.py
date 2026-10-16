@@ -1,7 +1,10 @@
 """REST admin endpoints for user management.
 
-Mounted at /admin on the solution's ASGI app. Gated by admin-scoped
-JWT — same signing key as user tokens, with scope: "admin".
+Mounted at /admin on the solution's ASGI app. Gated by an ``AdminAuth``
+strategy chosen by the app's auth mode: in shared-secret mode an
+admin-scoped JWT under the same ``SIGNING_KEY`` as user tokens; in OAuth
+resource-server mode the identity provider's token for an email listed
+in ``ADMIN_EMAILS``.
 """
 
 import os
@@ -45,7 +48,57 @@ def get_default_token_duration() -> int:
 SAFE_TOOL_SCHEMA_VERSION = "1"
 
 
-def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
+class SharedSecretAdminAuth:
+    """Admin auth for the shared-secret mode: HS256 JWT with ``scope: "admin"``.
+
+    Reads ``SIGNING_KEY`` (required) and ``JWT_AUD`` from the environment.
+    Also issues user tokens, which is what makes ``POST /admin/tokens`` and
+    the token in the ``POST /admin/users`` response possible in this mode.
+    """
+
+    issues_tokens = True
+
+    def __init__(self):
+        self.signing_key = os.environ.get("SIGNING_KEY")
+        if not self.signing_key:
+            raise RuntimeError(
+                "SIGNING_KEY environment variable is required for admin endpoints."
+            )
+        self.audience = os.environ.get("JWT_AUD")
+
+    async def verify(self, request: Request) -> bool:
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            return False
+        try:
+            claims = pyjwt.decode(
+                auth[7:], self.signing_key, algorithms=["HS256"],
+                audience=self.audience,
+            )
+            return claims.get("scope") == "admin"
+        except pyjwt.InvalidTokenError:
+            return False
+
+    def issue_token(self, email: str, duration_seconds: int | None = None) -> dict:
+        if duration_seconds is None:
+            duration_seconds = get_default_token_duration()
+        now = datetime.now(timezone.utc)
+        payload = {
+            "sub": email,
+            "iat": now,
+            "exp": now + timedelta(seconds=duration_seconds),
+        }
+        if self.audience:
+            payload["aud"] = self.audience
+        token = pyjwt.encode(payload, self.signing_key, algorithm="HS256")
+        return {
+            "email": email,
+            "token": token,
+            "duration_seconds": duration_seconds,
+        }
+
+
+def create_admin_app(store: UserAuthStore, safe_tool=None, admin_auth=None) -> Starlette:
     """Create a Starlette app with admin REST endpoints.
 
     Args:
@@ -58,50 +111,34 @@ def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
             endpoint carries only metadata — the CLI does the actual
             MCP handshake itself, avoiding duplication of MCP transport
             logic on the server.
+        admin_auth: Strategy deciding who may call these endpoints and
+            whether the deployment issues user tokens. Default:
+            ``SharedSecretAdminAuth()``. In OAuth resource-server mode
+            the ``App`` passes ``mcp_app.auth.OAuthAdminAuth``, which
+            accepts the identity provider's token for ``ADMIN_EMAILS``
+            members and issues no tokens.
     """
 
-    signing_key = os.environ.get("SIGNING_KEY")
-    if not signing_key:
-        raise RuntimeError(
-            "SIGNING_KEY environment variable is required for admin endpoints."
+    if admin_auth is None:
+        admin_auth = SharedSecretAdminAuth()
+
+    async def _verify_admin(request: Request) -> bool:
+        return await admin_auth.verify(request)
+
+    def _no_tokens() -> JSONResponse:
+        return JSONResponse(
+            {
+                "error": "tokens_not_issued_here",
+                "error_description": (
+                    "This deployment runs in OAuth resource-server mode; "
+                    "the authorization server issues user tokens"
+                ),
+            },
+            status_code=409,
         )
-    audience = os.environ.get("JWT_AUD")
-
-    def _verify_admin(request: Request) -> bool:
-        """Check that the request carries a valid admin-scoped JWT."""
-        auth = request.headers.get("authorization", "")
-        if not auth.startswith("Bearer "):
-            return False
-        try:
-            claims = pyjwt.decode(
-                auth[7:], signing_key, algorithms=["HS256"],
-                audience=audience,
-            )
-            return claims.get("scope") == "admin"
-        except pyjwt.InvalidTokenError:
-            return False
-
-    def _issue_token(email: str, duration_seconds: int | None = None) -> dict:
-        if duration_seconds is None:
-            duration_seconds = get_default_token_duration()
-        """Create a signed JWT for a user."""
-        now = datetime.now(timezone.utc)
-        payload = {
-            "sub": email,
-            "iat": now,
-            "exp": now + timedelta(seconds=duration_seconds),
-        }
-        if audience:
-            payload["aud"] = audience
-        token = pyjwt.encode(payload, signing_key, algorithm="HS256")
-        return {
-            "email": email,
-            "token": token,
-            "duration_seconds": duration_seconds,
-        }
 
     async def register_user(request: Request) -> JSONResponse:
-        if not _verify_admin(request):
+        if not await _verify_admin(request):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
 
         body = await request.json()
@@ -122,16 +159,18 @@ def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
                 profile=profile,
             )
 
-        return JSONResponse(_issue_token(email, duration))
+        if not admin_auth.issues_tokens:
+            return JSONResponse({"email": email, "registered": True})
+        return JSONResponse(admin_auth.issue_token(email, duration))
 
     async def list_users(request: Request) -> JSONResponse:
-        if not _verify_admin(request):
+        if not await _verify_admin(request):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
         users = await store.list()
         return JSONResponse([u.model_dump(mode="json") for u in users])
 
     async def revoke_user(request: Request) -> JSONResponse:
-        if not _verify_admin(request):
+        if not await _verify_admin(request):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
 
         email = request.path_params["email"]
@@ -145,7 +184,7 @@ def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
 
     async def update_profile(request: Request) -> JSONResponse:
         """Merge fields into a user's profile."""
-        if not _verify_admin(request):
+        if not await _verify_admin(request):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
 
         email = request.path_params["email"]
@@ -162,7 +201,7 @@ def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
 
     async def get_profile(request: Request) -> JSONResponse:
         """Read a user's profile."""
-        if not _verify_admin(request):
+        if not await _verify_admin(request):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
 
         email = request.path_params["email"]
@@ -174,7 +213,7 @@ def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
 
     async def create_token(request: Request) -> JSONResponse:
         """Issue a new token for an existing, active user."""
-        if not _verify_admin(request):
+        if not await _verify_admin(request):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
 
         body = await request.json()
@@ -186,8 +225,10 @@ def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
         if not user:
             return JSONResponse({"error": "User not found"}, status_code=404)
 
+        if not admin_auth.issues_tokens:
+            return _no_tokens()
         duration = body.get("duration_seconds", get_default_token_duration())
-        return JSONResponse(_issue_token(email, duration))
+        return JSONResponse(admin_auth.issue_token(email, duration))
 
     async def get_admin_health(request: Request) -> JSONResponse:
         """Full health diagnostic detail. Admin auth required.
@@ -197,7 +238,7 @@ def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
         the public response intentionally omits. Use this when /health
         reports degraded or unhealthy and you need to know why.
         """
-        if not _verify_admin(request):
+        if not await _verify_admin(request):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
         return JSONResponse(build_admin_health_detail())
 
@@ -208,7 +249,7 @@ def create_admin_app(store: UserAuthStore, safe_tool=None) -> Starlette:
         always present so future readers can detect format changes.
         Consumers must tolerate unknown fields.
         """
-        if not _verify_admin(request):
+        if not await _verify_admin(request):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
         if safe_tool is None:
             return JSONResponse({

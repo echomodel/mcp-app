@@ -26,7 +26,12 @@ from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Mount, Route
 
 from mcp_app.admin import create_admin_app
-from mcp_app.auth import OAuthResourceServer, OIDCTokenVerifier, SharedSecretJWT
+from mcp_app.auth import (
+    OAuthAdminAuth,
+    OAuthResourceServer,
+    OIDCTokenVerifier,
+    SharedSecretJWT,
+)
 from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
 from mcp_app.health_check import build_health_response
@@ -310,13 +315,17 @@ class App:
             self._mcp.tool()(_require_identity(func))
 
         auth_store = DataStoreAuthAdapter(store)
-        admin_app = create_admin_app(auth_store, safe_tool=self.safe_tool)
         if isinstance(auth_mode, OAuthResourceServer):
             verifier = OIDCTokenVerifier(auth_mode, auth_store)
             identity_middleware = OAuthMiddleware
+            admin_auth = OAuthAdminAuth(verifier)
         else:
             verifier = JWTVerifier(auth_store)
             identity_middleware = JWTMiddleware
+            admin_auth = None  # SharedSecretAdminAuth, built by create_admin_app
+        admin_app = create_admin_app(
+            auth_store, safe_tool=self.safe_tool, admin_auth=admin_auth
+        )
         # Transport parameters live on streamable_http_app() in SDK 2.x.
         # DNS-rebinding protection is off: the service sits behind a
         # platform load balancer and is addressed by many Host values;

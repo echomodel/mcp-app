@@ -40,6 +40,20 @@ logger = logging.getLogger("mcp_app.auth")
 ALLOWED_ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "ES512")
 
 
+ENV_ADMIN_EMAILS = "ADMIN_EMAILS"
+
+
+def admin_emails() -> frozenset[str]:
+    """Operator-declared administrators: ``ADMIN_EMAILS``, comma-separated.
+
+    Membership is the whole admin model in OAuth mode: nothing is stored,
+    there is no promotion path, and changing the set is a redeploy.
+    Compared lower-cased.
+    """
+    raw = os.environ.get(ENV_ADMIN_EMAILS, "")
+    return frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+
+
 @dataclass(frozen=True)
 class SharedSecretJWT:
     """The 1.x auth model: self-issued HS256 user tokens under ``SIGNING_KEY``.
@@ -258,6 +272,18 @@ class OIDCTokenVerifier:
             )
         email = email.lower()
         record = await self.auth_store.get_full(email)
+        if record is None and email in admin_emails():
+            # An operator named in ADMIN_EMAILS is admitted by declaration;
+            # the record is created on first sign-in so no `users add` is
+            # needed to bootstrap a deployment.
+            from datetime import datetime, timezone
+
+            from mcp_app.models import UserAuthRecord
+
+            await self.auth_store.save(
+                UserAuthRecord(email=email, created=datetime.now(timezone.utc))
+            )
+            record = await self.auth_store.get_full(email)
         if record is None:
             return "unknown", email
         record.profile = hydrate_profile(record.profile)
@@ -281,3 +307,30 @@ class OIDCTokenVerifier:
             subject=claims.get("sub"),
             claims=claims,
         )
+
+
+class OAuthAdminAuth:
+    """Admin auth for OAuth mode: the identity provider's token, for an admin email.
+
+    A request is admin when its bearer token verifies against the issuer
+    and its email claim is in ``ADMIN_EMAILS``. No shared secret is
+    involved, and the deployment issues no user tokens of its own.
+    """
+
+    issues_tokens = False
+
+    def __init__(self, verifier: OIDCTokenVerifier):
+        self.verifier = verifier
+
+    async def verify(self, request) -> bool:
+        auth = request.headers.get("authorization", "")
+        if auth[:7].lower() != "bearer ":
+            return False
+        claims = await self.verifier.verify_claims(auth[7:].strip())
+        if not claims:
+            return False
+        email = claims.get(self.verifier.config.email_claim)
+        return isinstance(email, str) and email.lower() in admin_emails()
+
+    def issue_token(self, email: str, duration_seconds: int | None = None) -> dict:
+        raise RuntimeError("OAuth resource-server mode does not issue user tokens")
