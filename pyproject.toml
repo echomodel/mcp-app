@@ -9,7 +9,7 @@ description = "Config-driven MCP application framework with auth, middleware, an
 requires-python = ">=3.11"
 dependencies = [
     "mcp[cli]>=2,<3",
-    "pyjwt>=2.0",
+    "pyjwt[crypto]>=2.0",
     "pydantic>=2.0",
     "starlette>=0.27",
     "uvicorn>=0.20",

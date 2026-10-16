@@ -150,6 +150,60 @@ JWTs, loads the full user record from the store, and sets the
 See [docs/custom-middleware.md](docs/custom-middleware.md) for
 advanced middleware configuration.
 
+### Authentication modes
+
+HTTP callers are authenticated one of two ways. The mode is chosen once,
+at startup, and nothing in tool code changes between them.
+
+| Mode | Selected by | Who issues user tokens | Client setup |
+|------|-------------|------------------------|--------------|
+| **OAuth resource server** (standard MCP authorization) | `AUTH_ISSUER` set, or `App(auth=OAuthResourceServer(...))` | An external OAuth 2.1 authorization server (an identity provider), typically fronting Sign in with Google | The user enters the server URL; the client discovers the issuer and runs the OAuth flow |
+| **Shared secret** (1.x model) | Neither of the above, or `App(auth=SharedSecretJWT())` | mcp-app itself, signed with `SIGNING_KEY` | The operator mints a token and the user pastes it into the client |
+
+In OAuth mode mcp-app is a *resource server*: it never sees a password
+and holds no signing secret. Per request it validates the token's
+signature against the issuer's published keys (JWKS), checks `iss`,
+`aud` and `exp`, reads the email claim, and loads that user's record.
+The outcomes a client sees:
+
+- **No token, or an invalid one** → `401` with
+  `WWW-Authenticate: Bearer ... resource_metadata="<url>"`. A standard
+  client follows that pointer to
+  `/.well-known/oauth-protected-resource`, learns the issuer, and
+  starts the flow. The document is public and built by the MCP SDK.
+- **Valid token, email not registered** → `403` and no challenge.
+  The identity is established; the service just isn't open to it.
+- **Valid token, registered email** → the request runs with
+  `current_user` set, exactly as in shared-secret mode.
+
+What the operator configures at the issuer: an API (its identifier
+becomes `AUTH_AUDIENCE`), dynamic client registration or client ID
+metadata documents so MCP clients can register themselves, S256
+PKCE, and the user's email included in access tokens under
+`AUTH_EMAIL_CLAIM`. `MCP_RESOURCE_URL` must be the URL users type,
+trailing slash included; it is published as the protected resource.
+The `?token=` query form is not accepted in this mode.
+
+```python
+from mcp_app import App, OAuthResourceServer
+
+app = App(
+    name="my-app",
+    tools_module=tools,
+    auth=OAuthResourceServer(
+        issuer="https://login.example.com/",
+        audience="https://mcp.example.com/",
+        resource_url="https://mcp.example.com/",
+        email_claim="https://example.com/email",
+    ),
+)
+```
+
+Passing `auth=` pins the mode in code; the environment variables do the
+same without a code change. `stdio` ignores both: identity there is
+the `--user` flag. The shared-secret mode remains the default while
+apps cut over; see `CONTRIBUTING.md` for the sequence.
+
 ### Extra routes (custom data plane)
 
 MCP tool responses are the wrong place for large binary payloads —
@@ -298,8 +352,13 @@ declaration is the tool author's (see the [mcp-app skill](skills/mcp-app/SKILL.m
 
 | Variable | Required | If Missing | Purpose |
 |----------|----------|------------|---------|
-| `SIGNING_KEY` | For HTTP | Startup fails | JWT signing key |
-| `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim |
+| `AUTH_ISSUER` | For OAuth mode | Shared-secret mode | Authorization server issuer, exactly as in the token's `iss` claim. Setting it selects OAuth resource-server mode. See [Authentication modes](#authentication-modes). |
+| `AUTH_AUDIENCE` | With `AUTH_ISSUER` | Startup fails | Value the token's `aud` claim must contain (the API identifier registered at the issuer) |
+| `MCP_RESOURCE_URL` | With `AUTH_ISSUER` | Startup fails | Public URL of this server, as clients type it; published as the protected resource |
+| `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (namespaced issuers: the full claim name) |
+| `AUTH_JWKS_URI` | No | OpenID discovery | Where to fetch the issuer's signing keys |
+| `SIGNING_KEY` | For HTTP in shared-secret mode | Startup fails | JWT signing key |
+| `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim (shared-secret mode) |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
 | `REQUIRED_FS_TYPE` | No | No assertion | Opt-in startup assertion that the data dir lives on a specific filesystem type. See [Data storage](#data-storage). |
 | `TOKEN_DURATION_SECONDS` | No | 315360000 (~10yr) | Token lifetime in seconds |
@@ -430,7 +489,7 @@ Every mcp-app solution has a `current_user` ContextVar set before tools execute.
 
 | Transport | How it's set |
 |-----------|-------------|
-| HTTP (`my-app-mcp serve`) | Identity middleware validates JWT, loads full user record from store |
+| HTTP (`my-app-mcp serve`) | Identity middleware validates the bearer token (issuer-signed in OAuth mode, self-issued in shared-secret mode), loads full user record from store |
 | stdio (`my-app-mcp stdio`) | CLI loads user record from store using `--user` flag |
 
 The SDK reads it:

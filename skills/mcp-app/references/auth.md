@@ -11,7 +11,20 @@ Other references point here instead of repeating it. Two places still
 touch it: `testing.md` Step 2 mints an admin JWT in a test, and
 `troubleshooting.md` names the signing chain as a failure layer.
 
-## The model in one paragraph
+## Two modes
+
+mcp-app 2.x has two HTTP auth modes. A deployment runs one of them, chosen
+at startup; tool code is identical under both.
+
+| Mode | Selected by | User tokens issued by | What the user does |
+|---|---|---|---|
+| **OAuth resource server** (standard MCP authorization) | `AUTH_ISSUER` set, or `App(auth=OAuthResourceServer(...))` | An external OAuth 2.1 authorization server (identity provider), normally fronting Sign in with Google | Enters the server URL in the client; signs in when the client sends them to the provider |
+| **Shared secret** (the 1.x model) | Neither of the above | mcp-app, signed with `SIGNING_KEY` | Pastes a token the operator minted |
+
+The rest of this file describes the shared-secret model unless a section
+says otherwise. For OAuth mode see "OAuth resource-server mode" at the end.
+
+## The shared-secret model in one paragraph
 
 HTTP mode authenticates every request with a JWT signed (HS256) by the
 deployment's `SIGNING_KEY`. User tokens carry the user's email as `sub`.
@@ -25,9 +38,14 @@ auth at all: whoever can launch the process is the user named by `--user`.
 
 | Var | Required | If missing | Purpose |
 |-----|----------|------------|---------|
-| `SIGNING_KEY` | For HTTP | Startup fails | JWT signing key. No default. |
-| `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim |
-| `TOKEN_DURATION_SECONDS` | No | 315360000 (~10yr) | Lifetime of newly issued tokens |
+| `AUTH_ISSUER` | For OAuth mode | Shared-secret mode | Issuer identifier, exactly as in the token's `iss` (trailing slash included if the issuer uses one). Setting it selects OAuth mode. |
+| `AUTH_AUDIENCE` | With `AUTH_ISSUER` | Startup fails | Value `aud` must contain: the API identifier registered at the issuer |
+| `MCP_RESOURCE_URL` | With `AUTH_ISSUER` | Startup fails | Public URL of this server, as users type it, trailing slash included |
+| `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email; namespaced issuers need the full name (e.g. `https://example.com/email`) |
+| `AUTH_JWKS_URI` | No | OpenID discovery | Issuer key set location, if discovery is unavailable |
+| `SIGNING_KEY` | For HTTP, shared-secret mode | Startup fails | JWT signing key. No default. |
+| `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim (shared-secret mode) |
+| `TOKEN_DURATION_SECONDS` | No | 315360000 (~10yr) | Lifetime of newly issued tokens (shared-secret mode) |
 
 **`SIGNING_KEY`** is a secret. Never commit it to the repo or put it in a
 checked-in config file. Generate a strong random value:
@@ -219,3 +237,61 @@ An app serving its own `extra_routes` (large downloads, say) may sign
 short-lived URLs with `SIGNING_KEY` and verify them in the route handler,
 since those routes get no JWT middleware. `authoring.md` covers the
 pattern. Any change to the key or the auth model affects those URLs too.
+
+## OAuth resource-server mode
+
+In this mode mcp-app holds no signing secret and never sees a password. An
+external OAuth 2.1 authorization server (the identity provider) signs in the
+user and issues the access token; mcp-app validates it and maps it to a user
+record.
+
+**Per request** the identity middleware: takes the bearer token from the
+`Authorization` header only (`?token=` is refused; the MCP spec forbids it);
+verifies the signature against the issuer's JWKS (fetched from OpenID
+discovery or `AUTH_JWKS_URI`, cached, refetched once on an unknown `kid`);
+checks `iss` == `AUTH_ISSUER`, `aud` contains `AUTH_AUDIENCE`, `exp`; reads
+`AUTH_EMAIL_CLAIM`; loads the user record for that email (lower-cased) and
+sets `current_user`.
+
+**What a client sees:**
+
+| Situation | Response | Meaning |
+|---|---|---|
+| No token, or invalid (bad signature, wrong `iss`/`aud`, expired, no email claim) | `401` + `WWW-Authenticate: Bearer error="invalid_token", ..., resource_metadata="<MCP_RESOURCE_URL>/.well-known/oauth-protected-resource"` | Authenticate. A standard client follows the pointer, learns the issuer, runs the flow |
+| Valid token, email not registered | `403`, no challenge | Identity established; not admitted. Register the user; re-authenticating cannot help |
+| Valid token, registered email | Normal MCP response | `current_user` set |
+| `GET /.well-known/oauth-protected-resource` | `200` `{"resource", "authorization_servers": [issuer], "bearer_methods_supported": ["header"]}` | Public discovery document, built by the MCP SDK |
+
+**The user journey:** the user enters `MCP_RESOURCE_URL` in their MCP
+client and nothing else. The client's first request gets the 401, reads the
+metadata document, reads the issuer's own metadata, registers itself
+(dynamic client registration, or a client ID metadata document if the
+issuer supports it), sends the user to sign in (Google, via the issuer),
+and comes back with a token. mcp-app sees only the token.
+
+**What the operator sets up at the issuer** (generic; provider UIs differ):
+
+1. An API (resource) whose identifier is `MCP_RESOURCE_URL`; it becomes
+   `AUTH_AUDIENCE`. Refresh tokens ("offline access") on.
+2. Sign in with Google as the only login method; password login off.
+3. Dynamic client registration enabled, or client ID metadata documents
+   supported, so MCP clients can register with the server URL alone.
+   Confirm with `curl <issuer>/.well-known/oauth-authorization-server`:
+   it must list `registration_endpoint` (or advertise CIMD) and `S256` in
+   `code_challenge_methods_supported`.
+4. The user's email added to access tokens. If the issuer namespaces custom
+   claims, set `AUTH_EMAIL_CLAIM` to the full claim name.
+5. If the issuer needs a default audience to issue JWT (not opaque) access
+   tokens when the client sends `resource` rather than `audience`, set it
+   to the API identifier.
+
+**Admin surface in this mode.** `/admin` still authenticates with the
+shared-secret admin JWT until the admin cutover lands; a deployment in
+OAuth mode therefore still sets `SIGNING_KEY` for `/admin`, and `tokens
+create` mints tokens no client will use. Register users with `users add`
+exactly as before; the token it prints is irrelevant in OAuth mode.
+
+**Testing without an issuer.** `OAuthResourceServer(..., jwks={"keys": [...]})`
+takes a static key set, so a test can sign tokens with a generated RSA key
+and run the whole stack in-process. mcp-app's own `tests/unit/test_oauth.py`
+is the worked example.

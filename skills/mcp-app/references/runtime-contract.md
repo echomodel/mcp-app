@@ -3,7 +3,7 @@
 Read this when running a solution locally over HTTP, containerizing it,
 deploying it, choosing where its data lives, reading `/health`, or deciding
 how to get from a validated working tree to a deployed URL. Auth variables
-(`SIGNING_KEY`, `JWT_AUD`, `TOKEN_DURATION_SECONDS`) are in `auth.md`.
+(`AUTH_*`, `SIGNING_KEY`, `JWT_AUD`, `TOKEN_DURATION_SECONDS`) are in `auth.md`.
 
 mcp-app describes what an app needs from its environment and leaves the
 deployment to the operator's tooling. This file is that contract.
@@ -12,8 +12,13 @@ deployment to the operator's tooling. This file is that contract.
 
 | Var | Required | If missing | Purpose |
 |-----|----------|------------|---------|
-| `SIGNING_KEY` | For HTTP | Startup fails | JWT signing key (`auth.md`) |
-| `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim (`auth.md`) |
+| `AUTH_ISSUER` | For OAuth mode | Shared-secret mode | Authorization server issuer; setting it selects OAuth resource-server mode (`auth.md`) |
+| `AUTH_AUDIENCE` | With `AUTH_ISSUER` | Startup fails | Required `aud` value, the API identifier at the issuer (`auth.md`) |
+| `MCP_RESOURCE_URL` | With `AUTH_ISSUER` | Startup fails | Public URL of this server as users type it (`auth.md`) |
+| `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (`auth.md`) |
+| `AUTH_JWKS_URI` | No | OpenID discovery | Issuer key set location (`auth.md`) |
+| `SIGNING_KEY` | For HTTP, shared-secret mode | Startup fails | JWT signing key (`auth.md`) |
+| `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim, shared-secret mode (`auth.md`) |
 | `TOKEN_DURATION_SECONDS` | No | ~10 years | Token lifetime (`auth.md`) |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
 | `REQUIRED_FS_TYPE` | No | No assertion | Opt-in startup check that the data dir is on a given filesystem type |

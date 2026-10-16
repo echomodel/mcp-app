@@ -230,6 +230,7 @@ Legend for the per-artifact columns:
 | Connect — local vs remote, generic vs per-app CLI | `mcp-app` skill | Summary | Full | `operate.md` |
 | User management CLI commands (operational) | `mcp-app` skill | Summary | Full | `operate.md` |
 | Auth model (signing key, admin JWTs, `JWT_AUD`, token lifetime) | README | Full | Full | `auth.md` |
+| Auth modes (`App.auth`: OAuth resource server vs shared secret; `AUTH_*` vars; 401/403 contract) | README | Full | Full | `auth.md`, `runtime-contract.md` |
 | Token lifecycle (issuance, revocation, rotation) | `mcp-app` skill | — | Full | `auth.md` |
 | Signing-key retrieval per deploy tool | `mcp-app` skill | — | Full | `auth.md` |
 | Troubleshooting decision tree and symptom table | `mcp-app` skill | — | Full | `troubleshooting.md` |
@@ -626,6 +627,39 @@ the code is in a public repo — anyone who reads it can forge JWTs.
 `SIGNING_KEY` must be explicitly set as an environment variable for
 HTTP mode. Missing or empty raises `RuntimeError` at startup.
 
+### OAuth resource-server mode is mcp-app's own middleware over the SDK's metadata route
+
+`App.auth` selects between two identity middlewares that sit in the
+same place in the ASGI stack and set `current_user` the same way:
+`JWTMiddleware` (shared secret, 1.x) and `OAuthMiddleware`
+(issuer-signed tokens, 2.x). `AUTH_ISSUER` in the environment picks
+OAuth mode so a deployment can cut over without a code change;
+`auth=` on the `App` pins a mode in code.
+
+The MCP SDK ships its own resource-server plumbing
+(`AuthSettings`, `BearerAuthBackend`, `RequireAuthMiddleware`). mcp-app
+uses one piece of it, `create_protected_resource_routes`, to serve the
+RFC 9728 metadata document, and keeps the request gate in its own
+middleware for two reasons:
+
+- **403 for a known-but-unadmitted identity.** The SDK's backend can
+  only answer "authenticated or not"; a valid token whose email is not
+  registered would come back as a `401` challenge, which tells a
+  standard client to re-authenticate, which cannot help. mcp-app needs
+  the third outcome, and the allowlist lookup that produces it is a
+  store read the SDK knows nothing about.
+- **One owner for `current_user`.** The ContextVar is set by the same
+  middleware layer in both modes, so the SDK (the app's business logic)
+  reads it identically whichever mode a deployment runs. Nothing below
+  the middleware knows which mode is in force.
+
+`OIDCTokenVerifier` nevertheless implements the SDK's `TokenVerifier`
+protocol, so an app that wants the SDK's middleware instead can hand it
+over unchanged. Verification is PyJWT against the issuer's JWKS, with
+`iss`, `aud` and `exp` checked and asymmetric algorithms only; the
+key set is cached and refetched once on an unknown `kid`, which is how
+issuer key rotation is absorbed without a restart.
+
 ### /health is structured, but reads only cached startup state
 
 `GET /health` returns a structured `{status, checks}` object with
@@ -959,7 +993,8 @@ The SDK's `MCPServer` provides `TokenVerifier`, `BearerAuthBackend`, and
   to a ContextVar per tool function
 
 Pure ASGI middleware owns the ContextVar and sets it before any app code
-runs. The SDK reads it. No bridging. No MCP SDK imports in the SDK.
+runs. The SDK reads it. No bridging. No MCP SDK imports in the SDK. This
+holds in both auth modes; see "OAuth resource-server mode" below.
 
 ### Two app patterns — same middleware, different SDK behavior
 
