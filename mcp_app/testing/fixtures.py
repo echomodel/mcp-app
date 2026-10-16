@@ -12,6 +12,9 @@ from pathlib import Path
 import pytest
 
 from mcp_app.app import App
+from mcp_app.testing.issuer import TestIssuer
+
+OPERATOR = "operator@example.com"
 
 
 def _binary_path(name: str) -> Path:
@@ -91,3 +94,48 @@ def profile_flags(app: App) -> list[str]:
     for name in app.profile_model.model_fields:
         flags.extend([f"--{name.replace('_', '-')}", "test-placeholder"])
     return flags
+
+
+@pytest.fixture(scope="session")
+def issuer():
+    """One stand-in identity provider per test session (one RSA key)."""
+    return TestIssuer()
+
+
+@pytest.fixture
+def oauth_env(app, issuer, tmp_path, monkeypatch):
+    """Run the app against the test issuer with an isolated store.
+
+    Sets the two production variables a deployment sets (the data path
+    and the administrators) and hands the issuer's key set to the ``App``
+    object. ``OPERATOR`` is the administrator; register other emails
+    through the admin API or expect 403.
+    """
+    monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
+    monkeypatch.setenv("ADMIN_EMAILS", OPERATOR)
+    issuer.configure(app)
+    yield issuer
+
+
+class mcp_running:
+    """Start the MCP session manager around in-process requests that reach tools.
+
+    httpx's ASGITransport runs no lifespan, so a request that passes the
+    identity gate and reaches the MCP layer needs the SDK's session manager
+    started by hand::
+
+        async with mcp_running(app, client):
+            await client.post("/", json=..., headers=...)
+    """
+
+    def __init__(self, app, client):
+        self.app, self.client = app, client
+
+    async def __aenter__(self):
+        await self.client.get("/health")  # builds the ASGI stack lazily
+        self._cm = self.app._mcp.session_manager.run()
+        await self._cm.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc):
+        await self._cm.__aexit__(*exc)

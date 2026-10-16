@@ -17,8 +17,8 @@ recurring journeys. The map serves two purposes:
 
 1. **Authoring context.** When building or reviewing an app,
    every journey below must work end-to-end. Missing journeys
-   (e.g., no `probe`, no typed profile flags, no post-deploy
-   signing-key retrieval path) are compliance gaps.
+   (e.g., no `probe`, no typed profile flags, no identity-provider
+   setup notes) are compliance gaps.
 2. **Documentation coverage.** The implementing app's README
    and CONTRIBUTING must walk readers through each journey in
    app-specific terms (see Documentation, below). The
@@ -42,30 +42,32 @@ recurring journeys. The map serves two purposes:
    stdio with their MCP client. May require a local user
    profile with credentials (API-proxy apps).
 3. **Deploy (HTTP)** — operator deploys the app to a target
-   platform with persistent storage and a secret-managed
-   signing key.
-4. **Connect admin CLI post-deploy** — operator retrieves the
-   signing key from wherever the deployment stored it, then
-   runs `my-app-admin connect <url> --signing-key xxx`.
-   Config persists per-app in `~/.config/{name}/setup.json`.
+   platform with persistent storage, `AUTH_ISSUER` and
+   `ADMIN_EMAILS` set, and the service URL registered at the
+   identity provider.
+4. **Connect admin CLI post-deploy** — operator runs
+   `my-app-admin connect <url>` (no credential). Config persists
+   per-app in `~/.config/{name}/setup.json`.
 5. **Manage users and credentials** — operator adds users,
    rotates backend credentials via `users update-profile`,
-   revokes access, issues new tokens. Profile field names and
-   descriptions drive CLI help text.
+   revokes access. Profile field names and descriptions drive CLI
+   help text. On a deployment in 2.0 this goes through `/admin`
+   with an administrator's token (`auth.md`); the CLI's `users`
+   group runs against the local store.
 6. **Sanity-check the deployment, connect end users** — split
    into two phases with different audiences:
    - **6a. Sanity-check the deployment** (admin only) — operator
-     runs `probe` to confirm the deployment is healthy
-     end-to-end (auth, MCP layer, tool listing). Independent of
-     any specific user.
+     runs `probe` to confirm the OAuth front door (health,
+     discovery document, 401 challenge). Independent of any
+     specific user.
    - **6b. Connect an end user** (admin → end-user handoff) —
-     operator runs `register --user <email>` to mint a token and
-     produce the exact commands the end user pastes into their
-     MCP client (Claude Code, Antigravity CLI, or Claude.ai web). The
-     admin and end user may be the same person (self-serve) or
-     different people; either way, the output of `register` is
-     consumed by an end-user-on-their-laptop persona, not the
-     admin persona.
+     operator runs `register` to produce the exact commands the
+     end user pastes into their MCP client (Claude Code,
+     Antigravity CLI, or Claude.ai web); the user then signs in
+     with the identity provider. The admin and end user may be the
+     same person (self-serve) or different people; either way,
+     the output of `register` is consumed by an
+     end-user-on-their-laptop persona, not the admin persona.
 
 The developer typically walks all six during initial release;
 the operator returns to journeys 4–6 for every credential
@@ -190,8 +192,8 @@ loaded for the deployment tooling, separate from the mcp-app skill
 and from the app itself.
 
 Connective tissue between sessions is retained by the mcp-app
-admin CLI's per-app `connect` config — URL + signing-key
-access persisted under XDG config paths
+admin CLI's per-app `connect` config — the deployed URL
+persisted under XDG config paths
 (`~/.config/{app-name}/setup.json`), always outside the
 solution app repo. That state can be managed and versioned by
 a dotfile manager or lifted into a separate, private
@@ -329,18 +331,21 @@ Start with the runtime contract, scoped to this app — what it
 needs from any environment. This applies to every deploy path:
 
 - Required env vars the app reads
-  (`SIGNING_KEY` always; `APP_USERS_PATH` pointing to
-  persistent storage; any app-specific env vars for data,
-  config, or cache paths). Name the variables and what they
-  mean. Don't prescribe concrete values that only make sense
-  in one environment.
+  (`AUTH_ISSUER` and `ADMIN_EMAILS` always; `APP_USERS_PATH`
+  pointing to persistent storage; any app-specific env vars
+  for data, config, or cache paths). Name the variables and
+  what they mean. Don't prescribe concrete values that only
+  make sense in one environment.
 - Start command (`my-app-mcp serve`, optional
   `--host`/`--port`)
 - Endpoint path (`/`, not `/mcp`), health path
   (`/health`), admin path (`/admin`)
-- Auth model: the app handles its own JWT auth; the
+- Auth model: standard MCP OAuth against the operator's
+  identity provider, validated by the app itself; the
   platform must allow unauthenticated HTTP through to the
-  app
+  app and forward `Host` unchanged. What to set up at the
+  identity provider (API identifier = the service URL, dynamic
+  client registration, email claim)
 
 Then document each supported deploy path as a peer
 subsection. Common options:
@@ -374,24 +379,22 @@ through the manual steps.
 
 This is the section most frequently neglected and most
 valuable. A reader returning to the app months later to rotate
-a token must be able to re-discover the admin workflow from
+a credential must be able to re-discover the admin workflow from
 this section alone:
 
-- `my-app-admin connect local` vs
-  `my-app-admin connect <url> --signing-key xxx`
-- How to retrieve the signing key — describe the mechanism,
-  not a location. "The signing key is wherever your
-  deployment put `SIGNING_KEY` — trace it back through your
-  deployment tooling (cloud secret manager, CI secret store,
-  deployment tool's secret command, etc.)." Name a concrete
-  retrieval path only if the repo has committed to a
-  specific deployment.
+- `my-app-admin connect local` vs `my-app-admin connect <url>`
+- That `connect` takes no credential: mcp-app holds no secret,
+  and the identity provider does the sign-in
 - What "local" means for this app and when to use it
 - The fact that `connect` persists config in
   `~/.config/{app-name}/setup.json` — subsequent admin
-  commands don't repeat `--url` or `--signing-key`
+  commands don't repeat `--url`
 - A reminder that `connect` and deploy are independent —
   deploying doesn't auto-connect the admin CLI
+- Which admin commands work against a deployment today
+  (`health`, `probe`, `register`) and how users are added to a
+  deployment (an `/admin` call with an administrator's token
+  from the identity provider), stated plainly
 
 **5. Manage users and credentials (admin journey)**
 
@@ -408,7 +411,7 @@ Concrete commands for this app's profile shape:
 - `users update-profile` to change a specific field
   without re-registering
 - `users get-profile` to read what's currently stored
-- `users list`, `users revoke`, `tokens create`
+- `users list`, `users revoke`
 - Where to obtain the backend credential for this app's
   profile fields (the URL users visit to generate an API
   token, the OAuth flow, etc.). This belongs in the docs
@@ -420,13 +423,15 @@ Concrete commands for this app's profile shape:
 
 - `my-app-admin probe` — what it checks and what good
   output looks like (admin-only; independent of any user)
-- `my-app-admin register --user <email>` — generates the
-  per-client setup commands the end user runs to add the
-  deployment to their MCP client
+- `my-app-admin register` — generates the per-client setup
+  commands the end user runs to add the deployment to their
+  MCP client; the client signs them in with the identity
+  provider on first use
+- Who gets in after signing in (`ADMIN_EMAILS` entries and
+  registered users) and what a `403` means for everyone else
 - Manual MCP client config as fallback (claude/agy
-  `mcp add` commands with HTTP transport, header-based
-  auth, the `${VAR}` env expansion pattern that both
-  clients support for keeping tokens out of config files)
+  `mcp add` commands with HTTP transport and the URL only;
+  the Claude.ai custom-connector form)
 - **Optional: live-tool smoke test.** For verification that
   goes deeper than `probe`, the implementing app's README may
   surface `safe-tool --invoke` (when the app declares a
@@ -439,9 +444,9 @@ Concrete commands for this app's profile shape:
 
 Several journeys hand off between an admin/operator audience and
 an end-user audience. The clearest example is journey 6b: the admin
-runs `register --user <email>`, which produces commands the *end
-user* runs on their own machine to add the deployment to their MCP
-client. Other handoffs work similarly — anywhere admin-produced
+registers the user and runs `register`, which produces commands the
+*end user* runs on their own machine to add the deployment to their
+MCP client and sign in. Other handoffs work similarly — anywhere admin-produced
 output is consumed by an end user.
 
 When admin and end user are the same person doing both jobs (the
@@ -456,8 +461,8 @@ Use markdown anchor links to bridge the two halves:
 - **From end-user sections back to admin prerequisites.** The
   end-user section should stand alone for a real end user reading
   it cold, but should reference what the admin must have already
-  done (e.g., "Your admin must have run `register --user <your-email>`
-  for you").
+  done (e.g., "Your admin must have registered your email, or you
+  must be in `ADMIN_EMAILS`").
 - **Use the literal section heading** the agent will produce as
   the link target. Markdown auto-generates anchors from headings
   (lowercased, spaces to hyphens, punctuation stripped) — verify
@@ -532,29 +537,32 @@ reader needs to navigate. Coherent product, not history exposé.
 
 ## Deploy
 
-<env var table — SIGNING_KEY, APP_USERS_PATH, app-specific>
+<env var table — AUTH_ISSUER, ADMIN_EMAILS, APP_USERS_PATH, app-specific>
 <runtime contract: start command, ports, endpoint paths,
  auth model>
 <Docker example as universal illustration — or, if the repo
  is deliberately platform-coupled, the concrete deployment
  route for that platform>
-<post-deploy: connect admin CLI, how to trace the signing
- key back through whatever deployment tooling was used>
+<identity provider setup: API identifier = service URL, dynamic
+ client registration, email claim>
+<post-deploy: connect admin CLI (URL only), probe>
 
 ## Manage users
 
 <users add with this app's actual flags>
-<users get-profile, users update-profile, users list, users revoke, tokens create>
+<users get-profile, users update-profile, users list, users revoke>
+<how a user is added to a deployment today: /admin with an administrator's token>
 <where to obtain backend credentials if API-proxy, or what each preference field controls>
 <forward anchor-link to "Connect end users" — admin's next step once a user is added>
 
 ## Sanity-check the deployment
 
-<probe — admin-only check that auth, MCP layer, and tool listing are healthy>
+<probe — admin-only check that health, discovery document, and the 401 challenge are right>
 
 ## Connect end users
 
 <register command — the per-client setup commands the end user runs; run register and document what it actually prints, don't paraphrase>
+<who can sign in: ADMIN_EMAILS entries and registered users; everyone else gets 403>
 <manual MCP client config as fallback>
 
 ## Smoke-test a tool (optional)
@@ -646,8 +654,8 @@ that have emerged across multiple apps built on this framework:
   startup failures.
 - **Configure/install/register as three distinct sections.**
   Install = getting the package. Configure = env vars,
-  signing key, profile data. Register = wiring into an MCP
-  client. Conflating these confuses readers.
+  identity provider, profile data. Register = wiring into an
+  MCP client. Conflating these confuses readers.
 - **Concrete example tool call** in the Run Locally
   section — a literal tool invocation through an MCP
   client or a curl against the HTTP endpoint. Gives the
@@ -658,7 +666,7 @@ that have emerged across multiple apps built on this framework:
   `probe`. This is the first step a returning operator
   takes months later.
 - **Rotating credentials as a named subsection** under
-  user management. The token-rotation path is the single
+  user management. The credential-rotation path is the single
   most-searched workflow after initial setup. Give it a
   heading.
 - **MCP client config shown for all three clients**

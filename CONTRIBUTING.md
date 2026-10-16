@@ -4,7 +4,7 @@
 
 mcp-app ships reusable test modules (`mcp_app.testing`) that any
 implementing app imports and runs against itself to check auth, user
-admin, JWT enforcement, CLI wiring, and tool protocol compliance.
+admin, token validation, CLI wiring, and tool protocol compliance.
 
 **In user-facing prose, lead with the value:** "free tests that check
 auth and user admin work for your app." Don't lead with jargon. The
@@ -130,11 +130,12 @@ mcp-app doesn't apply. Keep negative conditions in the body,
 not the description, and keep the instruction not to pitch
 mcp-app when it doesn't fit.
 
-**Auth material lives in `references/auth.md`.** The signing
-key, admin JWTs, token lifecycle, `JWT_AUD`, token lifetime,
-and client credential forms are isolated there so a change to
-the auth model is mostly a one-file change. Other references
-point to it instead of repeating it.
+**Auth material lives in `references/auth.md`.** The issuer
+configuration, the Host-derived audience and `AUTH_AUDIENCE`,
+`ADMIN_EMAILS`, the 401/403 contract, the issuer checklist, and
+the client sign-in journey are isolated there so a change to the
+auth model is mostly a one-file change. Other references point
+to it instead of repeating it.
 
 **Skills must be self-contained.** When adding content to a
 skill that sits alongside content in the README, do not write
@@ -219,7 +220,7 @@ Legend for the per-artifact columns:
 | `SafeTool` declaration (`App.safe_tool`) | README | Summary | Full | `authoring.md` |
 | `SafeTool` authoring rules (low-info-density) | `mcp-app` skill | Summary | Full | `authoring.md` |
 | `tools` subcommand group (CLI shape) | README | Summary | Full | `operate.md` |
-| Local testing (httpx ASGI transport) | README | Full | Full | `testing.md` |
+| Local testing (httpx ASGI transport, `TestIssuer`, `oauth_env`, `mcp_running`) | README | Full | Full | `testing.md` |
 | Running the server (stdio + HTTP) | README | Full | Summary | `runtime-contract.md` |
 | Runtime contract (start command, ports, endpoints) | README | Full | Full | `runtime-contract.md` |
 | Deployment posture (agnostic-default, opinionated alt.) | README | Full | Full | `app-docs.md`, `runtime-contract.md` |
@@ -229,10 +230,10 @@ Legend for the per-artifact columns:
 | Six-journey map | `mcp-app` skill | — | Full | `SKILL.md` (summary), `app-docs.md` (full) |
 | Connect — local vs remote, generic vs per-app CLI | `mcp-app` skill | Summary | Full | `operate.md` |
 | User management CLI commands (operational) | `mcp-app` skill | Summary | Full | `operate.md` |
-| Auth model (signing key, admin JWTs, `JWT_AUD`, token lifetime) | README | Full | Full | `auth.md` |
-| Auth modes (`App.auth`: OAuth resource server vs shared secret; `AUTH_*` vars; 401/403 contract) | README | Full | Full | `auth.md`, `runtime-contract.md` |
-| Token lifecycle (issuance, revocation, rotation) | `mcp-app` skill | — | Full | `auth.md` |
-| Signing-key retrieval per deploy tool | `mcp-app` skill | — | Full | `auth.md` |
+| Auth model (OAuth resource server: `AUTH_*` vars, Host-derived audience, `ADMIN_EMAILS`, 401/403 contract) | README | Full | Full | `auth.md` |
+| Issuer setup checklist (API identifier, DCR/CIMD, PKCE, email claim) | README | Full | Full | `auth.md` |
+| Admin access on a deployment (admin token from the issuer; CLI remote limits) | README | Full | Full | `operate.md`, `auth.md` |
+| Who can sign in (administrators, registered users, revocation) | README | Full | Full | `auth.md`, `operate.md` |
 | Troubleshooting decision tree and symptom table | `mcp-app` skill | — | Full | `troubleshooting.md` |
 | MCP client configuration (stdio + HTTP examples) | README | Full | Full | `operate.md` (stdio), `auth.md` (HTTP) |
 | `register` command output handling | README | Full | Full | `operate.md`, `app-docs.md` |
@@ -269,8 +270,8 @@ same PR.
 Not everything duplicates. These live in exactly one place:
 
 - **Architectural decisions and rationale** — CONTRIBUTING.md
-  only. Skills reference outcomes ("signing key has no
-  default"), not the decision history.
+  only. Skills reference outcomes ("mcp-app holds no signing
+  secret"), not the decision history.
 - **Conformance suite internals** — CONTRIBUTING.md only.
   Skills teach how to adopt the suite, not how it's built.
 - **Framework contributor workflow** (running tests, releasing,
@@ -394,11 +395,12 @@ tools that the AI agent orchestrates externally.
   in sequence
 
 **What this means in practice:**
-- RemoteAuthAdapter is stateless — takes a URL and signing key, makes REST calls
-- MCP admin tools take `base_url` and `signing_key` as explicit parameters
+- RemoteAuthAdapter is stateless — takes a URL and, for admin calls, an
+  administrator's access token, and makes REST calls
+- MCP admin tools take `base_url` and `access_token` as explicit parameters
 - No internal references to gapp, Cloud Run, or any deployment tool
-- The admin tools don't know how the service was deployed or where the signing
-  key came from
+- The admin tools don't know how the service was deployed or which identity
+  provider issued the token
 
 ### cwd is never used for deploy or admin
 
@@ -411,10 +413,9 @@ working directory.
 ### Connection config is set once, used everywhere
 
 Both the generic CLI (`mcp-app connect`) and per-app admin CLI
-(`my-app-admin connect`) store the service URL and signing key
-in a config file. Every subsequent command reads from that file.
-No command except `connect` accepts `--url` or `--signing-key`
-flags.
+(`my-app-admin connect`) store the service URL in a config file.
+Every subsequent command reads from that file. No command except
+`connect` accepts `--url`.
 
 The per-app CLI also supports `connect local` for direct
 filesystem store access. The generic CLI does not — it doesn't
@@ -422,43 +423,57 @@ know the app name, so it can't locate the store path
 (`~/.local/share/{name}/users/`).
 
 This is a deliberate design constraint. Repeating connection
-credentials on every command is error-prone, clutters help text,
-and teaches operators to paste secrets into shell history. The
-`connect` command is the single entry point for connection
+details on every command is error-prone and clutters help text.
+The `connect` command is the single entry point for connection
 config — all other commands assume it's already configured.
 
-The same principle extends to future CLI design (see
-OPERATIONS.md's design principles on "url and signing-key as
-first-class universals"). When adding new admin commands, they
-read connection details from the existing config. They do not
-accept their own `--url` or `--signing-key` overrides.
+The same principle extends to future CLI design. When adding new
+admin commands, they read connection details from the existing
+config. They do not accept their own `--url` override. When the
+CLI gains a sign-in (a device-code `login`), the resulting access
+token lives in the same `setup.json` next to the URL it belongs to
+(`connect` already keeps an `access_token` across a reconnect to
+the same URL and drops it for a different one), and no command
+takes a token flag.
 
 ### Config vs problem-domain resources
 
 `config` subcommands are for tool preferences (output format, storage backend,
-keychain settings). Problem-domain resources (fleets, users, tokens) get their
+keychain settings). Problem-domain resources (fleets, users) get their
 own top-level command groups with CRUD operations. Never mix them.
 
 **Test:** "If I deleted this, would I lose work or just a preference?"
 - Preference → `config`
 - Managed resource → its own command group
 
-### Signing key storage
+### No shared secret in 2.x
 
-The fleetless admin path needs to persist a signing key locally.
+The 1.x line authenticated HTTP callers with JWTs mcp-app itself
+signed using a deployment-wide `SIGNING_KEY`, minted admin tokens
+from the same key on the operator's machine, and had the operator
+paste user tokens into MCP clients. That model is gone from 2.x:
+there is no `SIGNING_KEY`, no `JWT_AUD`, no `TOKEN_DURATION_SECONDS`,
+no `/admin/tokens`, no `tokens` CLI group, no `?token=` query form,
+and `connect` takes no key. Nothing in the framework signs anything.
 
-- **Default:** OS keychain via `keyring` library (macOS Keychain, Windows
-  Credential Manager, Linux Secret Service). Zero config on desktop platforms.
-- **Fallback:** file-based storage in XDG config dir, chosen explicitly via
-  `mcp-app config signing-key-store file`. Never a silent fallback — fail
-  with an actionable hint if keychain is unavailable.
-- **Escape hatch:** `MCP_APP_SIGNING_KEY` env var or `--signing-key` flag
-  always work.
-- **Fleet mode:** the deploy provider resolves the signing key from the cloud's
-  secret store on demand. Nothing stored locally.
+Why it was removed rather than kept as a second mode:
 
-Note: current code writes to `active.json` in plaintext. This should migrate
-to keychain-first once `keyring` is added as a dependency.
+- A new app has no reason to choose it. Standard MCP authorization
+  gives every client a sign-in flow for free, and the operator
+  holds no secret that can leak, expire, or need retrieving after a
+  deploy.
+- Two modes mean two documentation stories, two test matrices, and
+  a seam (`App.auth`) whose default has to be argued about. One
+  model keeps the skill, the README and the conformance suite
+  straight.
+- The major version exists to make this break. Apps that need the
+  old model pin `mcp-app@v1.0.0` (which pins `mcp<2`) until they
+  move; `skills/mcp-app/references/framework-version.md` carries
+  the release-line table.
+
+The decision history for the old model (no default key, keychain
+storage plans, `MCP_APP_SIGNING_KEY`) is in the 1.0.0 tag's
+CONTRIBUTING.md and is not carried forward.
 
 ### Separate fleets over local override files
 
@@ -508,8 +523,8 @@ Apps generate three separate CLI entry points from one codebase:
 
 - `my-app` — the app's own business CLI (optional, app-specific)
 - `my-app-mcp` — `serve` and `stdio` (from `create_mcp_cli`)
-- `my-app-admin` — `connect`, `users`, `tokens`, `health`
-  (from `create_admin_cli`)
+- `my-app-admin` — `connect`, `users`, `health`, `probe`,
+  `register` (from `create_admin_cli`)
 
 **Why three, not one:** The app's business CLI, MCP server commands,
 and admin operations are different concerns with different audiences.
@@ -575,9 +590,12 @@ Both CLIs use `connect` to configure the admin target. Two modes:
   For stdio apps running on this machine. **Per-app CLI only** —
   requires the app name to locate the store path
   (`~/.local/share/{name}/users/`).
-- `connect <url> --signing-key xxx` — talk to a deployed instance
-  via HTTP admin API. For managing users on a remote server.
-  Available on both the generic and per-app CLIs.
+- `connect <url>` — talk to a deployed instance via its HTTP
+  surface. Available on both the generic and per-app CLIs. In
+  2.0.0 the remote target supports `health`, `probe` and
+  `register`; `users`, `tools` and `safe-tool` need a sign-in the
+  CLI does not yet perform and exit with a message saying so
+  (`NotSignedInError`).
 
 Both CLIs share a single `_connect_handler` implementation. The
 generic CLI passes `app_name=None`, which gates off `local` mode
@@ -620,27 +638,20 @@ The store layer still receives only the delta — the merge happens
 again at the storage layer, where it has always merged correctly.
 The CLI's merge is purely about validation.
 
-### SIGNING_KEY has no default
+### Standard MCP authorization is mcp-app's own middleware over the SDK's metadata model
 
-Earlier versions defaulted to `"dev-key"`. This was removed because
-the code is in a public repo — anyone who reads it can forge JWTs.
-`SIGNING_KEY` must be explicitly set as an environment variable for
-HTTP mode. Missing or empty raises `RuntimeError` at startup.
-
-### OAuth resource-server mode is mcp-app's own middleware over the SDK's metadata route
-
-`App.auth` selects between two identity middlewares that sit in the
-same place in the ASGI stack and set `current_user` the same way:
-`JWTMiddleware` (shared secret, 1.x) and `OAuthMiddleware`
-(issuer-signed tokens, 2.x). `AUTH_ISSUER` in the environment picks
-OAuth mode so a deployment can cut over without a code change;
-`auth=` on the `App` pins a mode in code.
+HTTP identity is one middleware, `OAuthMiddleware`, which validates
+issuer-signed tokens and sets `current_user`. There is no mode
+switch. `App.auth` takes an `OAuthResourceServer` to pin the issuer
+in code; otherwise it is built from `AUTH_ISSUER` and friends so one
+build serves any deployment.
 
 The MCP SDK ships its own resource-server plumbing
-(`AuthSettings`, `BearerAuthBackend`, `RequireAuthMiddleware`). mcp-app
-uses one piece of it, `create_protected_resource_routes`, to serve the
-RFC 9728 metadata document, and keeps the request gate in its own
-middleware for two reasons:
+(`AuthSettings`, `BearerAuthBackend`, `RequireAuthMiddleware`,
+`create_protected_resource_routes`). mcp-app uses its metadata model
+(`ProtectedResourceMetadata`, `ProtectedResourceMetadataHandler`) to
+serve the RFC 9728 document and keeps the request gate in its own
+middleware for three reasons:
 
 - **403 for a known-but-unadmitted identity.** The SDK's backend can
   only answer "authenticated or not"; a valid token whose email is not
@@ -648,25 +659,54 @@ middleware for two reasons:
   standard client to re-authenticate, which cannot help. mcp-app needs
   the third outcome, and the allowlist lookup that produces it is a
   store read the SDK knows nothing about.
-- **One owner for `current_user`.** The ContextVar is set by the same
-  middleware layer in both modes, so the SDK (the app's business logic)
-  reads it identically whichever mode a deployment runs. Nothing below
-  the middleware knows which mode is in force.
+- **A per-request resource.** The SDK's route serves one fixed
+  `resource` URL configured at startup. mcp-app derives it from the
+  request's `Host` (below), so the metadata handler is called with a
+  model built per request.
+- **One owner for `current_user`.** The ContextVar is set by the
+  middleware before any app code runs, so the SDK layer (the app's
+  business logic) reads it the same way on both transports.
 
-Admin follows the same split. `create_admin_app` takes an `AdminAuth`
-strategy: `SharedSecretAdminAuth` (HS256 admin JWT, issues user tokens)
-or `OAuthAdminAuth` (the provider's token, email in `ADMIN_EMAILS`, issues
-nothing). Admin is membership in that env var and nothing else: no role in
-the store, no promotion path, a redeploy to change it. An admin email is
-admitted as a user on first sign-in so a deployment bootstraps with no
-shared secret and no `users add`.
+Admin follows the same model. `create_admin_app` takes an admin
+strategy, `OAuthAdminAuth`, which accepts the provider's token when
+its email claim is in `ADMIN_EMAILS` and issues nothing. Admin is
+membership in that env var and nothing else: no role in the store,
+no promotion path, a redeploy to change it. An admin email is
+admitted as a user on first sign-in so a deployment bootstraps with
+no shared secret and no `users add`.
 
 `OIDCTokenVerifier` nevertheless implements the SDK's `TokenVerifier`
 protocol, so an app that wants the SDK's middleware instead can hand it
-over unchanged. Verification is PyJWT against the issuer's JWKS, with
-`iss`, `aud` and `exp` checked and asymmetric algorithms only; the
-key set is cached and refetched once on an unknown `kid`, which is how
-issuer key rotation is absorbed without a restart.
+over unchanged (that path needs `AUTH_AUDIENCE` set, because the SDK
+gives the verifier no request to derive it from). Verification is
+PyJWT against the issuer's JWKS, with `iss`, `aud` and `exp` checked
+and asymmetric algorithms only; the key set is cached and refetched
+once on an unknown `kid`, which is how issuer key rotation is absorbed
+without a restart.
+
+### The server's own URL comes from the request, not from configuration
+
+The audience a token must carry and the `resource` the discovery
+document advertises are both "this server's public URL". An earlier
+2.x draft configured it twice (`MCP_RESOURCE_URL` and
+`AUTH_AUDIENCE`) alongside the URL the operator had already
+registered at the issuer and typed into clients: three copies of
+one fact, each able to drift. 2.0 derives it from each request's
+`Host` header (`mcp_app.auth.request_base_url`): scheme from the
+ASGI scope, which `serve` fills from the front door's
+`X-Forwarded-Proto`; host from `Host`, never from
+`X-Forwarded-Host`, which any client can add.
+
+On a hostname-routed front door (Cloud Run, Kubernetes ingress, an
+API gateway, a reverse proxy) `Host` is authoritative: the request
+reached this process because of it. The residual exposure of not
+pinning is a token issued for one mcp-app server being replayed to
+another behind the same issuer, which requires the attacker to hold
+a user's valid token already and to route it under a hostname the
+victim server answers to; token lifetime bounds the window. That is
+small enough that the default is derived, and `AUTH_AUDIENCE` exists
+for the deployment reached by address rather than by name. This is
+the same report-facts, opt-in-enforce split as `REQUIRED_FS_TYPE`.
 
 ### /health is structured, but reads only cached startup state
 
@@ -728,8 +768,8 @@ question: "is persistent storage verified, unverified, or
 unavailable?"
 
 Future check keys follow the same convention: name the contract.
-A check that asserts JWT signing-key load is `signing_key_loaded`,
-not `jwt_secret_present`. A check that asserts an upstream API is
+A check that asserts the issuer's keys were fetched is
+`issuer_keys_loaded`, not `jwks_fetch_succeeded`. A check that asserts an upstream API is
 reachable is `upstream_reachable`, not `api_call_succeeds`. The
 underlying mechanism may change; the contract usually doesn't.
 
@@ -778,9 +818,10 @@ The motivating threat: a tool that reads a file path the **caller** supplies
 is safe over stdio (the process runs as the local user) but is an
 **arbitrary server-side file read over HTTP**, where the server is
 multi-tenant. With the public source and a known data-volume layout, a caller
-names `/proc/self/environ` (the signing key lives in the process env) or
-another user's data file, the server reads it, and it's exfiltrated via a
-record the caller controls — cross-tenant secret disclosure and auth bypass.
+names `/proc/self/environ` (the process env, with whatever credentials
+the app's SDK holds) or another user's data file, the server reads it,
+and it's exfiltrated via a record the caller controls — cross-tenant
+disclosure.
 
 Why this shape and not the alternatives:
 
@@ -831,13 +872,14 @@ framework coupling.
 - Tool discovery from module path (public async functions)
 - Store abstraction (`filesystem` built-in, custom via module path)
 - Identity middleware (`user-identity`) — runs by default in HTTP mode
-- Admin REST endpoints at `/admin` (register with profile, list, revoke, tokens)
+- Admin REST endpoints at `/admin` (register with profile, list, revoke, profile read/update)
 - `current_user` ContextVar — `User` object with `.email` and `.profile`
 - `register_profile()` — typed profile validation via Pydantic
 - `UserAuthStore` protocol
 - `UserDataStore` protocol + `FileSystemUserDataStore`
 - `DataStoreAuthAdapter` bridge
-- `JWTVerifier`
+- `OAuthResourceServer` / `OIDCTokenVerifier` — issuer configuration and token validation
+- `mcp_app.testing.issuer.TestIssuer` — a stand-in identity provider for tests
 - `RemoteAuthAdapter` — stateless REST client for deployed instances
 - MCP admin tools server (`mcp-app admin-tools`)
 
@@ -940,9 +982,12 @@ for each discovered function.
 ### How identity works
 
 Identity middleware (`user-identity`) runs by default in HTTP mode. It:
-1. Extracts JWT from Authorization header or `?token=` query param
-2. Validates JWT signature and claims via `JWTVerifier`
-3. Loads the full user record from the store (auth + profile, one read)
+1. Takes the bearer token from the `Authorization` header (the `?token=`
+   query form is refused)
+2. Validates signature, `iss`, `aud` and `exp` against the issuer's JWKS
+   via `OIDCTokenVerifier`; `aud` is the URL the request arrived at
+3. Loads the full user record for the token's email claim (auth +
+   profile, one read); an `ADMIN_EMAILS` entry with no record gets one
 4. Hydrates the profile with the registered Pydantic model if available
 5. Sets `current_user` ContextVar — available to all tool functions
 
@@ -1001,8 +1046,8 @@ The SDK's `MCPServer` provides `TokenVerifier`, `BearerAuthBackend`, and
   to a ContextVar per tool function
 
 Pure ASGI middleware owns the ContextVar and sets it before any app code
-runs. The SDK reads it. No bridging. No MCP SDK imports in the SDK. This
-holds in both auth modes; see "OAuth resource-server mode" below.
+runs. The SDK reads it. No bridging. No MCP SDK imports in the SDK. See
+"Standard MCP authorization is mcp-app's own middleware" above.
 
 ### Two app patterns — same middleware, different SDK behavior
 
@@ -1092,11 +1137,7 @@ The `mcp-app` skill guides agents through building and operating
 apps on this framework. It must remain agnostic to deployment tools. It
 may mention a deployment tool (e.g., gapp) parenthetically as one
 option among several, but must never contain deployment-tool-specific
-configuration or workflows. The one exception is signing-key
-retrieval in `references/auth.md`, which lists how to read the key
-back out of several common stores (a cloud secret manager,
-Terraform, a deployment tool's secret command), because an
-operator can't connect without it. The skill describes the
+configuration or workflows. The skill describes the
 app's runtime contract — what it needs from any environment — and
 leaves the deployment tool's skill to handle the rest.
 
@@ -1168,55 +1209,56 @@ so solutions get it for free. No extra dependencies to write tests.
 
 ### What to test in solutions
 
-Solutions should validate their tools and auth flow locally:
+Solutions should validate their tools and auth flow locally. The
+stand-in identity provider in `mcp_app.testing.issuer` signs tokens
+with a generated RSA key and hands the key set to the `App`, so the
+real verifier runs against real signatures with no network:
 
 ```python
-import os
-import pytest
 import httpx
+import pytest
 from my_app import app
+from mcp_app.testing.fixtures import OPERATOR, issuer, mcp_running, oauth_env  # noqa: F401
 
 @pytest.fixture
-def app_client(tmp_path):
+def app_client(oauth_env):
     """Return an httpx client that runs the full ASGI app in-process."""
-    os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
-    os.environ["SIGNING_KEY"] = "test-key"
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 @pytest.mark.asyncio
-async def test_admin_register_and_list(app_client):
+async def test_admin_register_and_list(app_client, oauth_env):
     """Register a user via admin API, verify they appear in list."""
-    # Mint an admin token
-    import jwt as pyjwt
-    from datetime import datetime, timezone, timedelta
-    admin_token = pyjwt.encode(
-        {"sub": "admin", "scope": "admin",
-         "iat": datetime.now(timezone.utc),
-         "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
-        "test-key", algorithm="HS256",
-    )
-    headers = {"Authorization": f"Bearer {admin_token}"}
+    headers = oauth_env.headers(OPERATOR)   # an ADMIN_EMAILS entry
 
-    # Register
     resp = await app_client.post(
         "/admin/users",
         json={"email": "user@example.com"},
         headers=headers,
     )
     assert resp.status_code == 200
-    data = resp.json()
-    assert "token" in data
+    assert resp.json() == {"email": "user@example.com", "registered": True}
 
-    # List
     resp = await app_client.get("/admin/users", headers=headers)
     assert resp.status_code == 200
-    users = resp.json()
-    assert any(u["email"] == "user@example.com" for u in users)
+    assert any(u["email"] == "user@example.com" for u in resp.json())
+
+@pytest.mark.asyncio
+async def test_registered_user_lists_tools(app_client, oauth_env):
+    body = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+    headers = {**oauth_env.headers(OPERATOR), "Accept": "application/json, text/event-stream"}
+    async with mcp_running(app, app_client):      # starts the SDK session manager
+        resp = await app_client.post("/", json=body, headers=headers)
+    assert resp.status_code == 200
 ```
 
-This tests the full stack: yaml config → tool discovery → middleware →
-admin endpoints → store → filesystem. Same code path as production.
+`oauth_env` sets `APP_USERS_PATH` to a temp dir and `ADMIN_EMAILS` to
+`OPERATOR`, and points the `App` at the test issuer. Tokens carry
+`aud` equal to the client's base URL (`http://test/`), because the
+server derives its audience from the request's `Host`.
+
+This tests the full stack: tool discovery → middleware → admin
+endpoints → store → filesystem. Same code path as production.
 
 ### mcp-app's own tests
 
@@ -1225,7 +1267,7 @@ mcp-app uses the same pattern internally:
 ```python
 transport = httpx.ASGITransport(app=starlette_app)
 http_client = httpx.AsyncClient(transport=transport, base_url="http://test")
-client = RemoteAuthAdapter("http://test", signing_key, http_client=http_client)
+client = RemoteAuthAdapter("http://test", issuer.token(OPERATOR), http_client=http_client)
 ```
 
 RemoteAuthAdapter → httpx → ASGI → Starlette → admin.py → FileSystemUserDataStore → tmp_path.
@@ -1251,8 +1293,8 @@ claude mcp add my-app -- mcp-app stdio --user alice@example.com
 
 Everything that matters for deployment readiness:
 - Tool discovery from the tools module
-- Middleware auth (JWT validation, user identity)
-- Admin endpoints (user registration, listing, tokens)
+- Middleware auth (token validation, user identity)
+- Admin endpoints (user registration, listing, profiles)
 - Store wiring (per-user data, auth records)
 - SDK business logic (your actual tools)
 

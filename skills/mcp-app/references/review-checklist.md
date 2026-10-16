@@ -62,7 +62,8 @@ ready to deploy?"
 - [ ] XDG path resolver functions in SDK (data, config, cache)
 - [ ] Each resolver checks env var override first, then XDG fallback
 - [ ] No hardcoded absolute paths in code
-- [ ] `SIGNING_KEY` required for HTTP (no default)
+- [ ] No app-level auth env vars, signing keys, or token stores; HTTP
+      auth is `AUTH_ISSUER` + `ADMIN_EMAILS` from mcp-app (`auth.md`)
 
 ### Testing
 - [ ] SDK unit tests in `tests/unit/`
@@ -100,7 +101,9 @@ ready to deploy?"
       `Dockerfile`) shipped if the author wants the solution
       deployable via non-mcp-app tooling — these are additive,
       not a commitment to any platform
-- [ ] `SIGNING_KEY` set as environment variable (no default; `auth.md`)
+- [ ] Deployment sets `AUTH_ISSUER` and `ADMIN_EMAILS`, and the
+      service's public URL is registered as the API identifier at the
+      identity provider (`auth.md`)
 - [ ] `APP_USERS_PATH` on persistent storage for durable deployments, and
       `REQUIRED_FS_TYPE` considered so a missing volume fails startup
       (`runtime-contract.md`)

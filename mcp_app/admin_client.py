@@ -1,37 +1,48 @@
-"""Remote auth adapter — implements UserAuthStore over HTTP.
+"""Remote admin client — implements UserAuthStore over HTTP.
 
-Connects to a deployed mcp-app instance's /admin REST endpoints.
-Mints admin JWTs locally using the signing key.
+Talks to a deployed mcp-app instance's /admin REST endpoints and MCP
+endpoint with an access token the caller already holds. The adapter
+never mints anything: in 2.x the authorization server issues tokens,
+and the token presented here is the operator's own, which the server
+checks against ``ADMIN_EMAILS``.
+
+Without a token the adapter can still do everything a deployment
+exposes publicly: health, the protected-resource metadata document,
+and the unauthenticated challenge an MCP client sees first.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
-
 import httpx
-import jwt as pyjwt
 
+from mcp_app.auth import METADATA_PATH
 from mcp_app.models import UserAuthRecord, UserRecord
 
 
-class NoProbeUserError(RuntimeError):
-    """Raised when an admin command needs a user identity to mint a probe
-    token but none is available on the deployment.
+class NotSignedInError(RuntimeError):
+    """Raised when an admin operation needs an access token and none is held.
 
-    Typed so CLI helpers can catch it and surface an actionable message
-    (rather than a stack trace) without swallowing other RuntimeError
-    sources. The default str(exc) message is suitable for direct display
-    via click.ClickException.
+    Typed so CLI helpers can turn it into a one-line message rather than a
+    stack trace. The default message is suitable for direct display.
     """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message
+            or "This operation needs an administrator's access token from the "
+            "identity provider, and this client has none. Manage users from an "
+            "MCP client signed in as an administrator, or use the local store "
+            "(`connect local`)."
+        )
 
 
 class RemoteAuthAdapter:
     """UserAuthStore implementation backed by a remote mcp-app instance."""
 
-    def __init__(self, base_url: str, signing_key: str,
+    def __init__(self, base_url: str, access_token: str | None = None,
                  http_client: httpx.AsyncClient | None = None):
         self.base_url = base_url.rstrip("/")
-        self.signing_key = signing_key
+        self.access_token = access_token
         self._http = http_client or httpx.AsyncClient()
 
     async def aclose(self) -> None:
@@ -47,79 +58,66 @@ class RemoteAuthAdapter:
         """
         await self._http.aclose()
 
-    def _admin_token(self) -> str:
-        now = datetime.now(timezone.utc)
-        payload = {
-            "sub": "admin",
-            "scope": "admin",
-            "iat": now,
-            "exp": now + timedelta(minutes=5),
-        }
-        return pyjwt.encode(payload, self.signing_key, algorithm="HS256")
-
-    def _headers(self) -> dict:
-        return {"Authorization": f"Bearer {self._admin_token()}"}
+    # -- public surface: no token needed ----------------------------------
 
     async def health_check(self) -> dict:
         resp = await self._http.get(f"{self.base_url}/health", timeout=10)
         return {"status": "healthy", "status_code": resp.status_code}
 
-    def _user_token(self, email: str, minutes: int = 5) -> str:
-        now = datetime.now(timezone.utc)
-        payload = {
-            "sub": email,
-            "iat": now,
-            "exp": now + timedelta(minutes=minutes),
-        }
-        return pyjwt.encode(payload, self.signing_key, algorithm="HS256")
+    async def discovery(self) -> dict:
+        """The RFC 9728 protected-resource metadata document."""
+        resp = await self._http.get(f"{self.base_url}{METADATA_PATH}", timeout=10)
+        resp.raise_for_status()
+        return resp.json()
 
-    async def probe(self, user_email: str | None = None) -> dict:
-        """End-to-end service probe.
+    async def probe(self) -> dict:
+        """Verify the OAuth front door without signing in.
 
-        Hits /health, then attempts an MCP tools/list round-trip using a
-        short-lived token minted for user_email. If user_email is None, the
-        first registered user is used. If no user is available, returns
-        liveness-only with a reason.
+        Hits /health, reads the metadata document (which names the issuer),
+        then sends one unauthenticated MCP request and checks that the 401
+        challenge points back at that document. Passing means the framework
+        layer is wired: an MCP client can discover the issuer and start the
+        sign-in flow. Tool listing needs a signed-in client.
         """
-        result = {"url": self.base_url, "health": None, "mcp": None, "tools": None}
+        result = {"url": self.base_url, "health": None, "oauth": None}
         try:
-            health = await self.health_check()
-            result["health"] = health
+            result["health"] = await self.health_check()
         except Exception as exc:
             result["health"] = {"status": "unreachable", "error": str(exc)}
             return result
 
-        if user_email is None:
-            try:
-                users = await self.list()
-            except Exception as exc:
-                result["mcp"] = {
-                    "status": "skipped",
-                    "reason": f"could not enumerate users: {exc}",
-                }
-                return result
-            active = [u for u in users if u.revoke_after is None]
-            if not active:
-                result["mcp"] = {
-                    "status": "skipped",
-                    "reason": "no registered users — cannot mint a probe token",
-                }
-                return result
-            user_email = active[0].email
-
-        token = self._user_token(user_email)
-        url = self.base_url + "/"
+        oauth: dict = {"status": "error"}
         try:
-            tool_names = await _mcp_list_tools(url, token, self._http)
-            result["mcp"] = {"status": "ok", "probed_as": user_email}
-            result["tools"] = tool_names
+            metadata = await self.discovery()
+            oauth["issuer"] = (metadata.get("authorization_servers") or [None])[0]
+            oauth["resource"] = metadata.get("resource")
+            resp = await self._http.post(
+                self.base_url + "/",
+                headers={"Content-Type": "application/json",
+                         "Accept": "application/json, text/event-stream"},
+                json=_mcp_body("tools/list", None, 1),
+                timeout=15,
+            )
+            challenge = resp.headers.get("www-authenticate", "")
+            oauth["challenge"] = challenge
+            if resp.status_code == 401 and "resource_metadata=" in challenge:
+                oauth["status"] = "ok"
+            else:
+                oauth["error"] = (
+                    f"expected 401 with a resource_metadata challenge, "
+                    f"got {resp.status_code}"
+                )
         except Exception as exc:
-            result["mcp"] = {
-                "status": "error",
-                "probed_as": user_email,
-                "error": str(exc),
-            }
+            oauth["error"] = str(exc)
+        result["oauth"] = oauth
         return result
+
+    # -- admin surface: the operator's token ------------------------------
+
+    def _headers(self) -> dict:
+        if not self.access_token:
+            raise NotSignedInError()
+        return {"Authorization": f"Bearer {self.access_token}"}
 
     async def get(self, email: str) -> UserAuthRecord | None:
         users = await self.list()
@@ -189,16 +187,6 @@ class RemoteAuthAdapter:
         resp.raise_for_status()
         return resp.json()
 
-    async def create_token(self, email: str) -> dict:
-        resp = await self._http.post(
-            f"{self.base_url}/admin/tokens",
-            headers=self._headers(),
-            json={"email": email},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
     async def get_safe_tool(self) -> dict:
         """Fetch the deployment's safe-tool declaration envelope.
 
@@ -215,65 +203,34 @@ class RemoteAuthAdapter:
         resp.raise_for_status()
         return resp.json()
 
-    async def _pick_probe_user(self, user_email: str | None) -> str | None:
-        """Resolve which user identity to mint a token for."""
-        if user_email is not None:
-            return user_email
-        users = await self.list()
-        active = [u for u in users if u.revoke_after is None]
-        return active[0].email if active else None
+    # -- MCP surface: the operator acts as themselves ----------------------
 
-    async def list_tools(self, user_email: str | None = None) -> tuple[list[dict], str]:
-        """Run JSON-RPC tools/list. Returns (tools, probed_as).
+    async def list_tools(self) -> list[dict]:
+        """Run JSON-RPC tools/list as the token holder. Returns full tool dicts."""
+        if not self.access_token:
+            raise NotSignedInError()
+        return await _mcp_list_tools_full(self.base_url + "/", self.access_token, self._http)
 
-        Raises NoProbeUserError when the deployment has no registered
-        users to mint a probe token for. (Passing --user for a user that
-        isn't registered won't help — auth middleware rejects the
-        unknown email; the deployment must actually have the user.)
-        """
-        probed_as = await self._pick_probe_user(user_email)
-        if probed_as is None:
-            raise NoProbeUserError(
-                "No registered users on this deployment — cannot mint a "
-                "probe token. Register one first with `users add <email>`."
-            )
-        token = self._user_token(probed_as)
-        url = self.base_url + "/"
-        tools = await _mcp_list_tools_full(url, token, self._http)
-        return tools, probed_as
-
-    async def call_tool(
-        self,
-        name: str,
-        arguments: dict,
-        user_email: str | None = None,
-    ) -> dict:
-        """Invoke a tool via JSON-RPC tools/call.
+    async def call_tool(self, name: str, arguments: dict) -> dict:
+        """Invoke a tool via JSON-RPC tools/call as the token holder.
 
         Returns an envelope with the assembled invocation (URL, headers,
         body) and the response (status_code, body) so callers can both
         replay the request and inspect the result.
         """
-        probed_as = await self._pick_probe_user(user_email)
-        if probed_as is None:
-            raise NoProbeUserError(
-                "No registered users on this deployment — cannot mint a "
-                "token to invoke a tool. Register one first with "
-                "`users add <email>`."
-            )
-        token = self._user_token(probed_as)
+        if not self.access_token:
+            raise NotSignedInError()
         url = self.base_url + "/"
         params = {"name": name, "arguments": arguments}
         body = _mcp_body("tools/call", params, request_id=2)
         status, response_body = await mcp_request(
-            url, token, "tools/call", params, self._http, request_id=2,
+            url, self.access_token, "tools/call", params, self._http, request_id=2,
         )
         return {
-            "probed_as": probed_as,
             "invocation": {
                 "method": "POST",
                 "url": url,
-                "headers": _mcp_headers(token),
+                "headers": _mcp_headers(self.access_token),
                 "body": body,
             },
             "result": {
@@ -329,15 +286,6 @@ async def mcp_request(
     finally:
         if http_client is None:
             await client.aclose()
-
-
-async def _mcp_list_tools(
-    url: str, token: str, http_client: httpx.AsyncClient | None = None,
-) -> list[str]:
-    """MCP tools/list round-trip — returns sorted tool names."""
-    _, data = await mcp_request(url, token, "tools/list", None, http_client, request_id=1, timeout=15)
-    tools = data.get("result", {}).get("tools", [])
-    return sorted(t["name"] for t in tools)
 
 
 async def _mcp_list_tools_full(

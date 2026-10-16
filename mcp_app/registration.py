@@ -1,8 +1,10 @@
 """Client registration command generation for deployed mcp-app instances.
 
 Produces the exact commands an operator (or agent) pastes into each MCP
-client (Claude Code, Antigravity CLI `agy`) and the URL form used by Claude.ai, for
-a given deployed service URL and bearer token.
+client (Claude Code, Antigravity CLI `agy`) and the URL to add in Claude.ai,
+for a given deployed service URL. No credential appears in any of them:
+the client discovers the authorization server from the URL and runs the
+sign-in itself.
 """
 
 from __future__ import annotations
@@ -13,26 +15,14 @@ import subprocess
 CLIENTS = ("claude", "agy", "claude.ai")
 SCOPES = ("user", "project")
 
-TOKEN_PLACEHOLDER = "<YOUR_PAT>"
+
+def _claude_cmd(name: str, url: str, scope: str) -> str:
+    return f"claude mcp add --transport http -s {scope} {name} {url}"
 
 
-def _claude_cmd(name: str, url: str, token: str, scope: str) -> str:
-    return (
-        f'claude mcp add --transport http '
-        f'--header "Authorization: Bearer {token}" '
-        f'-s {scope} {name} {url}'
-    )
-
-
-def _agy_cmd(name: str, url: str, token: str) -> str:
+def _agy_cmd(name: str, url: str) -> str:
     # agy requires flags before <name>; http URLs set the server type.
-    return f'agy mcp add --header "Authorization: Bearer {token}" {name} {url}'
-
-
-
-def _claude_ai_url(url: str, token: str) -> str:
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}token={token}"
+    return f"agy mcp add {name} {url}"
 
 
 def _is_registered(client: str, name: str, scope: str) -> bool | None:
@@ -68,7 +58,6 @@ def _is_registered(client: str, name: str, scope: str) -> bool | None:
 def generate_registrations(
     name: str,
     url: str,
-    token: str | None = None,
     clients: list[str] | None = None,
     scopes: list[str] | None = None,
     detect_registered: bool = False,
@@ -78,8 +67,6 @@ def generate_registrations(
     Args:
         name: MCP server name the client will know the service by.
         url: Deployed service base URL. Must end with '/'.
-        token: User bearer token. If None, a placeholder is emitted so the
-            operator can substitute after minting a token.
         clients: Subset of {"claude", "agy", "claude.ai"}. Default: all.
         scopes: Subset of {"user", "project"}. Default: all. Applies to
             claude only; agy has one user-level config and claude.ai is a
@@ -88,14 +75,13 @@ def generate_registrations(
             note whether the name is already registered at that scope.
 
     Returns:
-        Dict with 'url', 'name', 'token', and an 'entries' list of
+        Dict with 'url', 'name', and an 'entries' list of
         {client, scope, command, registered} records.
     """
     if not url.endswith("/"):
         url = url + "/"
     clients = list(clients) if clients else list(CLIENTS)
     scopes = list(scopes) if scopes else list(SCOPES)
-    tok = token or TOKEN_PLACEHOLDER
     entries = []
 
     for client in clients:
@@ -103,7 +89,7 @@ def generate_registrations(
             entries.append({
                 "client": "claude.ai",
                 "scope": None,
-                "command": _claude_ai_url(url, tok),
+                "command": url,
                 "registered": None,
             })
             continue
@@ -111,13 +97,13 @@ def generate_registrations(
             entries.append({
                 "client": "agy",
                 "scope": None,
-                "command": _agy_cmd(name, url, tok),
+                "command": _agy_cmd(name, url),
                 "registered": _is_registered("agy", name, "user") if detect_registered else None,
             })
             continue
         for scope in scopes:
             if client == "claude":
-                cmd = _claude_cmd(name, url, tok, scope)
+                cmd = _claude_cmd(name, url, scope)
             else:
                 continue
             registered = (
@@ -133,7 +119,6 @@ def generate_registrations(
     return {
         "url": url,
         "name": name,
-        "token_provided": token is not None,
         "entries": entries,
     }
 
@@ -151,7 +136,7 @@ def format_registrations(result: dict) -> str:
             else "status unknown"
         )
         if client == "claude.ai":
-            label = f"{client} (manual)"
+            label = f"{client} (manual: Settings > Connectors > Add custom connector)"
         elif scope is None:
             label = f"{client} (user config, {status})"
         else:
@@ -159,4 +144,5 @@ def format_registrations(result: dict) -> str:
         lines.append(f"{label}:")
         lines.append(f"  {e['command']}")
         lines.append("")
+    lines.append("Each client signs the user in with the identity provider on first use.")
     return "\n".join(lines).rstrip() + "\n"

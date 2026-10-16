@@ -14,26 +14,26 @@ from starlette.routing import Mount, Route
 
 from mcp_app.admin import create_admin_app
 from mcp_app.admin_client import RemoteAuthAdapter
+from mcp_app.auth import OAuthAdminAuth, OIDCTokenVerifier
 from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
 from mcp_app.models import UserAuthRecord
 
+from .conftest import OPERATOR
 
-SIGNING_KEY = "test-key-update-profile-32chars!"
 BASE_URL = "http://test"
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
-    monkeypatch.setenv("SIGNING_KEY", SIGNING_KEY)
+def store(auth_env):
     return FileSystemUserDataStore(app_name="test")
 
 
 @pytest.fixture
-def app(store):
+def app(store, issuer):
     auth_store = DataStoreAuthAdapter(store)
-    admin_app = create_admin_app(auth_store)
+    verifier = OIDCTokenVerifier(issuer.config, auth_store)
+    admin_app = create_admin_app(auth_store, admin_auth=OAuthAdminAuth(verifier))
 
     async def health(request):
         return JSONResponse({"status": "ok"})
@@ -45,10 +45,10 @@ def app(store):
 
 
 @pytest.fixture
-def adapter(app):
+def adapter(app, issuer):
     transport = httpx.ASGITransport(app=app)
     http_client = httpx.AsyncClient(transport=transport, base_url=BASE_URL)
-    return RemoteAuthAdapter(BASE_URL, SIGNING_KEY, http_client=http_client)
+    return RemoteAuthAdapter(BASE_URL, issuer.token(OPERATOR), http_client=http_client)
 
 
 # --- update_profile via REST ---
@@ -115,20 +115,16 @@ async def test_bridge_update_profile_nonexistent(store):
 # --- add rejects existing (REST layer) ---
 
 @pytest.mark.asyncio
-async def test_add_existing_user_returns_token_without_overwrite(adapter):
-    """REST register_user checks for existing user and skips the save."""
+async def test_add_existing_user_does_not_overwrite_profile(adapter):
+    """REST register_user checks for an existing user and skips the save."""
     await adapter.save(
         UserAuthRecord(email="alice@test.com", created=datetime.now(timezone.utc)),
         profile={"token": "original"},
     )
-    # Second save through REST should not overwrite profile
     result = await adapter.save(
         UserAuthRecord(email="alice@test.com", created=datetime.now(timezone.utc)),
         profile={"token": "overwritten"},
     )
-    # REST returns a token (it issues one) but doesn't overwrite
-    assert "token" in result
-    # Verify profile was preserved
+    assert result["registered"] is True
     full = await adapter.get_full("alice@test.com")
-    # The profile should still be "original" since REST skips save for existing
-    # (REST layer returns token without re-saving)
+    assert full.profile == {"token": "original"}

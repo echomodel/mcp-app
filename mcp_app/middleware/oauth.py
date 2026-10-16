@@ -1,8 +1,6 @@
-"""Bearer-token identity middleware for the OAuth resource-server mode.
+"""Bearer-token identity middleware: the one HTTP identity layer.
 
-Sits outside the MCP ASGI app, exactly where :class:`JWTMiddleware` sits
-in shared-secret mode, and owns the ``current_user`` ContextVar the same
-way. Differences from the 1.x middleware:
+Sits outside the MCP ASGI app and owns the ``current_user`` ContextVar.
 
 * Tokens come only from the ``Authorization`` header. The ``?token=``
   query form is not accepted; the MCP authorization spec forbids it.
@@ -21,15 +19,14 @@ client has a token).
 
 import json
 
-from mcp_app.auth import OIDCTokenVerifier, OAuthResourceServer
+from mcp_app.auth import METADATA_PATH, OIDCTokenVerifier, request_base_url
 
 
 class OAuthMiddleware:
     def __init__(self, app, verifier: OIDCTokenVerifier, store=None):
         self.app = app
         self.verifier = verifier
-        self.config: OAuthResourceServer = verifier.config
-        self._metadata_url = self.config.resource_metadata_url()
+        self.config = verifier.config
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -39,13 +36,16 @@ class OAuthMiddleware:
         if path == "/health" or path.startswith("/.well-known/"):
             return await self.app(scope, receive, send)
 
+        base_url = request_base_url(scope)
         token = _bearer_token(scope)
         if not token:
-            return await self._challenge(send, "Authentication required")
+            return await self._challenge(send, base_url, "Authentication required")
 
-        status, value = await self.verifier.resolve_user(token)
+        status, value = await self.verifier.resolve_user(
+            token, self.config.audience_for(base_url)
+        )
         if status == "invalid":
-            return await self._challenge(send, value)
+            return await self._challenge(send, base_url, value)
         if status == "unknown":
             return await _send_json(
                 send,
@@ -57,10 +57,11 @@ class OAuthMiddleware:
             )
         await self.app(scope, receive, send)
 
-    async def _challenge(self, send, description: str):
+    async def _challenge(self, send, base_url: str, description: str):
+        metadata_url = base_url.rstrip("/") + METADATA_PATH
         www = (
             f'Bearer error="invalid_token", error_description="{description}", '
-            f'resource_metadata="{self._metadata_url}"'
+            f'resource_metadata="{metadata_url}"'
         )
         await _send_json(
             send,

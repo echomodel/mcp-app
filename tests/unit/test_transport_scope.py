@@ -84,7 +84,7 @@ def test_stdio_discovery_skips_http_only_tool():
 
 @pytest.mark.asyncio
 async def test_http_app_does_not_register_stdio_only_tool(monkeypatch, tmp_path):
-    monkeypatch.setenv("SIGNING_KEY", "test-signing-key")
+    monkeypatch.setenv("AUTH_ISSUER", "https://issuer.test/")
     monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
     app = App(name="test", tools_module=_tools_module())
     app._asgi = app._build_asgi()

@@ -19,6 +19,8 @@ import os
 import pytest
 import httpx
 
+from mcp_app.testing.fixtures import issuer, oauth_env  # noqa: F401
+
 
 _FORBIDDEN_PUBLIC_KEYS = {
     "path", "fs_type", "required_fs_type", "free_bytes",
@@ -27,13 +29,9 @@ _FORBIDDEN_PUBLIC_KEYS = {
 
 
 @pytest.fixture
-def health_client(app, tmp_path):
-    os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
-    os.environ["SIGNING_KEY"] = "tck-test-key-32chars-minimum-len!!"
+def health_client(app, oauth_env):
     transport = httpx.ASGITransport(app=app)
     yield httpx.AsyncClient(transport=transport, base_url="http://test")
-    os.environ.pop("APP_USERS_PATH", None)
-    os.environ.pop("SIGNING_KEY", None)
 
 
 @pytest.mark.asyncio

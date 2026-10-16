@@ -17,13 +17,14 @@ impactful tools quickly — you need them to be consistent and secure
 without repeating boilerplate into each one and trying to manage all
 the implementations. You want to scale impact instead of adding to
 the cognitive load needed to keep deploying and trusting you'll be
-able to come back and refresh a token or add a user months later.
+able to come back and rotate a credential or add a user months later.
 
 mcp-app gives you:
 
-- **Identity enforced by default.** JWT auth runs automatically.
-  Tools can't execute without an established user. You can't
-  accidentally ship a wide-open service.
+- **Identity enforced by default.** Standard MCP authorization runs
+  automatically: users sign in with your identity provider, and
+  tools can't execute without an established user. You can't
+  accidentally ship a wide-open service, and you hold no secret.
 - **User management built in.** Admin endpoints, CLI for local and
   remote user management, typed profile per user — identical across
   every app.
@@ -39,10 +40,10 @@ mcp-app gives you:
   volume mount can't silently route writes to ephemeral storage.
 - **Deployment-ready.** Container, bare metal, Cloud Run, or gapp.
 
-The consistency is the point. User management, token rotation, auth
-enforcement, admin CLI — these work the same way across all your
+The consistency is the point. User management, credential rotation,
+auth enforcement, admin CLI — these work the same way across all your
 solutions. Learn it once, the tests confirm it works, and when you
-need to update a token or revoke a user six months later, the
+need to rotate a credential or revoke a user six months later, the
 workflow is the same regardless of which app you're touching.
 
 ## Install
@@ -144,23 +145,19 @@ the startup `data_dir` log line, and the optional
 ### Middleware
 
 Identity middleware runs automatically in HTTP mode. It validates
-JWTs, loads the full user record from the store, and sets the
-`current_user` ContextVar. No configuration needed.
+the bearer token against the identity provider's keys, loads the
+full user record from the store, and sets the `current_user`
+ContextVar. No configuration beyond the issuer is needed.
 
 See [docs/custom-middleware.md](docs/custom-middleware.md) for
 advanced middleware configuration.
 
-### Authentication modes
+### Authentication
 
-HTTP callers are authenticated one of two ways. The mode is chosen once,
-at startup, and nothing in tool code changes between them.
-
-| Mode | Selected by | Who issues user tokens | Client setup |
-|------|-------------|------------------------|--------------|
-| **OAuth resource server** (standard MCP authorization) | `AUTH_ISSUER` set, or `App(auth=OAuthResourceServer(...))` | An external OAuth 2.1 authorization server (an identity provider), typically fronting Sign in with Google | The user enters the server URL; the client discovers the issuer and runs the OAuth flow |
-| **Shared secret** (1.x model) | Neither of the above, or `App(auth=SharedSecretJWT())` | mcp-app itself, signed with `SIGNING_KEY` | The operator mints a token and the user pastes it into the client |
-
-In OAuth mode mcp-app is a *resource server*: it never sees a password
+HTTP callers authenticate with standard MCP authorization. mcp-app is
+an OAuth 2.1 *resource server*: an external authorization server (an
+identity provider, typically fronting Sign in with Google) signs the
+user in and issues the access token. mcp-app never sees a password
 and holds no signing secret. Per request it validates the token's
 signature against the issuer's published keys (JWKS), checks `iss`,
 `aud` and `exp`, reads the email claim, and loads that user's record.
@@ -170,22 +167,54 @@ The outcomes a client sees:
   `WWW-Authenticate: Bearer ... resource_metadata="<url>"`. A standard
   client follows that pointer to
   `/.well-known/oauth-protected-resource`, learns the issuer, and
-  starts the flow. The document is public and built by the MCP SDK.
+  starts the sign-in flow. The document is public.
 - **Valid token, email not registered** → `403` and no challenge.
   The identity is established; the service just isn't open to it.
 - **Valid token, registered email** → the request runs with
-  `current_user` set, exactly as in shared-secret mode.
+  `current_user` set.
 - **Valid token, email in `ADMIN_EMAILS`** → admitted even if not yet
   registered; the record is created on first sign-in. This is how a
   fresh deployment bootstraps without `users add`.
 
-What the operator configures at the issuer: an API (its identifier
-becomes `AUTH_AUDIENCE`), dynamic client registration or client ID
-metadata documents so MCP clients can register themselves, S256
-PKCE, and the user's email included in access tokens under
-`AUTH_EMAIL_CLAIM`. `MCP_RESOURCE_URL` must be the URL users type,
-trailing slash included; it is published as the protected resource.
-The `?token=` query form is not accepted in this mode.
+The token is read from the `Authorization` header only. The
+`?token=` query form is not accepted.
+
+**Configuration is the issuer and the administrators**, nothing
+more. `AUTH_ISSUER` names the authorization server; `ADMIN_EMAILS`
+names who may call `/admin`. Everything about *this* server — its
+public URL, and therefore the audience a token must carry and the
+`resource` it advertises — is derived from each request's `Host`
+header. On any front door that routes by hostname (Cloud Run, a
+Kubernetes ingress, an API gateway, a reverse proxy) that header is
+the same fact that delivered the request, so there is nothing to
+configure and nothing to drift. `serve` honors the front door's
+`X-Forwarded-Proto`, so the derived URL is `https` behind TLS
+termination. `AUTH_AUDIENCE` pins the audience for the rare
+deployment reached by address rather than by name, or one answering
+on several hostnames; see [Environment
+Variables](#environment-variables).
+
+**What the operator sets up at the issuer** (provider UIs differ):
+
+1. An API (resource) whose identifier is the server's public URL,
+   exactly as users type it, trailing slash included. Refresh
+   tokens ("offline access") on.
+2. Sign in with Google as the login method; password login off.
+3. Dynamic client registration enabled, or client ID metadata
+   documents supported, so MCP clients register themselves with the
+   server URL alone. `<issuer>/.well-known/oauth-authorization-server`
+   must list a `registration_endpoint` (or advertise CIMD) and
+   `S256` under `code_challenge_methods_supported`.
+4. The user's email included in access tokens. If the issuer
+   namespaces custom claims, set `AUTH_EMAIL_CLAIM` to the full claim
+   name.
+5. If the issuer needs a default audience to issue JWT (not opaque)
+   access tokens when a client sends `resource` rather than
+   `audience`, set it to the API identifier.
+
+The same configuration can be pinned in code. The environment
+variables exist so one build can be parameterized per deployment
+without a code change:
 
 ```python
 from mcp_app import App, OAuthResourceServer
@@ -195,17 +224,12 @@ app = App(
     tools_module=tools,
     auth=OAuthResourceServer(
         issuer="https://login.example.com/",
-        audience="https://mcp.example.com/",
-        resource_url="https://mcp.example.com/",
         email_claim="https://example.com/email",
     ),
 )
 ```
 
-Passing `auth=` pins the mode in code; the environment variables do the
-same without a code change. `stdio` ignores both: identity there is
-the `--user` flag. The shared-secret mode remains the default while
-apps cut over; see `CONTRIBUTING.md` for the sequence.
+`stdio` ignores all of this: identity there is the `--user` flag.
 
 ### Extra routes (custom data plane)
 
@@ -230,8 +254,8 @@ sdk = MySDK()
 async def download(request):
     # The app owns this route's auth. A common pattern is a
     # self-authorizing signed URL: an MCP tool mints a short-lived
-    # URL signed with SIGNING_KEY, the agent fetches it with a plain
-    # GET, and this handler verifies the signature before streaming.
+    # URL signed with a secret the app holds, the agent fetches it
+    # with a plain GET, and this handler verifies the signature.
     file_id = request.path_params["file_id"]
     sdk.verify_signed_url(request.url)          # 403 on bad/expired sig
     return StreamingResponse(sdk.stream(file_id))
@@ -248,11 +272,11 @@ How it behaves:
 - Routes are mounted **after** `/health` and `/admin` and **before**
   the MCP catch-all at `/`, so they take precedence over MCP but
   cannot shadow the framework's own endpoints.
-- The framework does **not** wrap them in JWT identity middleware —
+- The framework does **not** wrap them in identity middleware —
   each route owns its auth, exactly like the public `/health` route.
   This is deliberate: an out-of-band data plane is typically reached
-  by a fetch that carries no agent JWT, so the URL itself must be the
-  credential (e.g. a signed-URL scheme verified in the handler).
+  by a fetch that carries no access token, so the URL itself must be
+  the credential (e.g. a signed-URL scheme verified in the handler).
 - `extra_routes` defaults to `None`. Apps that don't need it pass
   nothing and get the standard three-route stack unchanged — no new
   imports, no behavior change. (Starlette is already a dependency of
@@ -353,36 +377,41 @@ declaration is the tool author's (see the [mcp-app skill](skills/mcp-app/SKILL.m
 
 ## Environment Variables
 
+mcp-app reads its configuration from the environment so one build can
+be parameterized per deployment. Three variables configure a
+production HTTP deployment; the rest are overrides for unusual
+setups. None of them is a secret: mcp-app holds no signing key, the
+identity provider does.
+
 | Variable | Required | If Missing | Purpose |
 |----------|----------|------------|---------|
-| `AUTH_ISSUER` | For OAuth mode | Shared-secret mode | Authorization server issuer, exactly as in the token's `iss` claim. Setting it selects OAuth resource-server mode. See [Authentication modes](#authentication-modes). |
-| `AUTH_AUDIENCE` | With `AUTH_ISSUER` | Startup fails | Value the token's `aud` claim must contain (the API identifier registered at the issuer) |
-| `MCP_RESOURCE_URL` | With `AUTH_ISSUER` | Startup fails | Public URL of this server, as clients type it; published as the protected resource |
-| `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (namespaced issuers: the full claim name) |
-| `AUTH_JWKS_URI` | No | OpenID discovery | Where to fetch the issuer's signing keys |
-| `ADMIN_EMAILS` | For OAuth mode | No administrators | Comma-separated emails that may call `/admin`; each is also admitted as a user on first sign-in |
-| `SIGNING_KEY` | For HTTP in shared-secret mode | Startup fails | JWT signing key |
-| `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim (shared-secret mode) |
+| `AUTH_ISSUER` | For HTTP | Startup fails | The authorization server's issuer identifier, exactly as in the token's `iss` claim (trailing slash included if the issuer uses one). See [Authentication](#authentication). |
+| `ADMIN_EMAILS` | For HTTP | No administrators; startup warns | Comma-separated emails that may call `/admin`. Each is also admitted as a user on first sign-in. |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
+| `AUTH_AUDIENCE` | No | Derived from the request `Host` | Value the token's `aud` claim must contain. Set only for a deployment reached by address rather than hostname, or one answering on several hostnames. |
+| `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (namespaced issuers: the full claim name) |
+| `AUTH_JWKS_URI` | No | OpenID discovery | Where to fetch the issuer's signing keys, if discovery is unavailable |
 | `REQUIRED_FS_TYPE` | No | No assertion | Opt-in startup assertion that the data dir lives on a specific filesystem type. See [Data storage](#data-storage). |
-| `TOKEN_DURATION_SECONDS` | No | 315360000 (~10yr) | Token lifetime in seconds |
 
-**`SIGNING_KEY`** is a secret. Never commit it to the repo. Generate
-a strong random value:
+**`AUTH_ISSUER`** must match the token's `iss` claim byte for byte; a
+missing or extra trailing slash is the usual mistake. The startup
+log's `mcp_app.startup auth` line echoes what the server is using.
 
-```bash
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-```
+**`ADMIN_EMAILS`** is the whole admin model. Nothing is stored, there
+is no promotion path, and changing the set is a redeploy. Compared
+lower-cased. With it empty the server starts and serves registered
+users, but nobody can call `/admin` or bootstrap the first user, so
+startup logs a warning.
 
-How it gets into the environment depends on your deployment: CI/CD
-secrets (e.g., GitHub Actions), cloud secret managers (e.g., GCP
-Secret Manager), or deployment tools that generate and manage
-secrets directly.
-
-**`JWT_AUD`** — if unset, audience is not validated. Apps sharing the
-same signing key without distinct `JWT_AUD` values will accept each
-other's user tokens. If each app has a unique signing key, audience
-validation is less critical.
+**`AUTH_AUDIENCE`** — by default the audience a token must carry is
+the URL the request arrived at, which is the API identifier the
+operator registered at the issuer, so a token issued for one mcp-app
+server is refused by another. Pin it when the derived URL is wrong:
+the server is reached by IP, or several hostnames route to it. The
+exposure of leaving it derived on a hostname-routed platform is
+small and bounded: an attacker would already need a user's valid
+token *and* a way to route it to this server under a different
+hostname, and token lifetime bounds the window.
 
 **`APP_USERS_PATH`** — the default writes to the local filesystem,
 which works for development. In a container, this path is ephemeral
@@ -390,10 +419,6 @@ which works for development. In a container, this path is ephemeral
 user data is silently lost on container restart. No error, no
 warning. For any persistent deployment, set `APP_USERS_PATH` to a
 mounted volume or persistent storage path.
-
-**`TOKEN_DURATION_SECONDS`** — the default (~10 years) effectively
-means tokens are permanent. Set a shorter value if tokens should
-expire. Applies to newly issued tokens only.
 
 **`REQUIRED_FS_TYPE`** — opt-in startup assertion. See [Data storage](#data-storage).
 
@@ -493,7 +518,7 @@ Every mcp-app solution has a `current_user` ContextVar set before tools execute.
 
 | Transport | How it's set |
 |-----------|-------------|
-| HTTP (`my-app-mcp serve`) | Identity middleware validates the bearer token (issuer-signed in OAuth mode, self-issued in shared-secret mode), loads full user record from store |
+| HTTP (`my-app-mcp serve`) | Identity middleware validates the issuer-signed bearer token, loads the full user record from the store |
 | stdio (`my-app-mcp stdio`) | CLI loads user record from store using `--user` flag |
 
 The SDK reads it:
@@ -587,27 +612,33 @@ Refuses to start without `--user`.
 
 REST admin endpoints are mounted at `/admin` in HTTP mode:
 
-- `POST /admin/users` — register user (with optional profile); returns a
-  JWT in shared-secret mode, `{"email", "registered": true}` in OAuth mode
+- `POST /admin/users` — register user (with optional profile); returns
+  `{"email", "registered": true}`
 - `GET /admin/users` — list users
 - `GET /admin/users/{email}/profile` — read a user's profile
 - `PATCH /admin/users/{email}/profile` — merge fields into a user's profile
 - `DELETE /admin/users/{email}` — revoke user
-- `POST /admin/tokens` — issue new token for existing user (shared-secret
-  mode only; `409` in OAuth mode, where the authorization server issues tokens)
 - `GET /admin/safe-tool` — return the deployment's safe-tool declaration
   (or a structured "not declared" envelope)
 - `GET /admin/health` — full health diagnostic detail (paths, fs_type,
   free bytes, mount source) that the public `/health` intentionally
   omits. See [Health endpoint](#health-endpoint).
 
-Gated by the deployment's auth mode: in shared-secret mode an
-admin-scoped JWT (`scope: "admin"`, same signing key); in OAuth mode
-the identity provider's token for an email listed in `ADMIN_EMAILS`.
-Admin is membership in that variable, nothing stored and no promotion
-path; changing the set is a redeploy. The admin CLI does not yet sign
-in to an OAuth-mode deployment, so `/admin` there is reached with a
-bearer token obtained from the identity provider.
+They accept the identity provider's access token for an email listed
+in `ADMIN_EMAILS` — the same kind of token an MCP client obtains for
+that user. mcp-app issues no tokens of its own, so there is no token
+endpoint: the authorization server issues every token, and
+`DELETE /admin/users/{email}` is the access control on this side.
+
+**Reaching `/admin` on a deployment.** The admin CLI runs every
+`users` command against the local store (`connect local`). Against a
+deployment it does not yet sign in, so remote `users`, `tools` and
+`safe-tool` commands exit with a message saying so; a signed-in
+remote mode is planned. Until then an administrator drives `/admin`
+on a deployment with their own access token from the identity
+provider (`curl -H "Authorization: Bearer <token>"`), and the common
+case — the operator is the first user — needs no admin call at all,
+because an `ADMIN_EMAILS` entry is admitted on first sign-in.
 
 ### Safe tool
 
@@ -714,7 +745,7 @@ use the admin surface or the startup logs.
 
 ### Admin surface for full detail
 
-`GET /admin/health` (admin-scoped JWT) returns the full diagnostic:
+`GET /admin/health` (an administrator's token) returns the full diagnostic:
 
 ```json
 {
@@ -785,8 +816,8 @@ See CONTRIBUTING.md for full test examples.
 
 ### stdio (local, single user)
 
-No auth, no signing key, no server process. The MCP client launches
-the process directly:
+No auth, no identity provider, no server process. The MCP client
+launches the process directly:
 
 ```bash
 my-app-mcp stdio --user local
@@ -798,21 +829,24 @@ the store. Refuses to start without it.
 ### HTTP (multi-user)
 
 ```bash
-SIGNING_KEY=your-key my-app-mcp serve
+AUTH_ISSUER=https://login.example.com/ \
+ADMIN_EMAILS=you@example.com \
+  my-app-mcp serve
 ```
 
-With persistent storage and all options:
+With persistent storage:
 
 ```bash
-SIGNING_KEY=your-key \
+AUTH_ISSUER=https://login.example.com/ \
+ADMIN_EMAILS=you@example.com,ops@example.com \
 APP_USERS_PATH=/data/my-app/users \
-JWT_AUD=my-app \
-TOKEN_DURATION_SECONDS=2592000 \
   my-app-mcp serve --host 0.0.0.0 --port 8080
 ```
 
 Runs uvicorn on `0.0.0.0:8080` by default. Override with `--host`
-and `--port`.
+and `--port`. `serve` honors `X-Forwarded-Proto` from the front
+door, so behind TLS termination the server knows its public URL is
+`https`.
 
 ## Deployment
 
@@ -828,7 +862,7 @@ reader's deployment tooling map to it. Docker is a useful
 universal illustration; specific platforms (Cloud Run, ECS,
 Kubernetes) should only appear in your docs if the app is
 deliberately coupled to one. Concrete values tied to a
-deployment (signing-key secret names, `APP_USERS_PATH` paths,
+deployment (the issuer URL, `APP_USERS_PATH` paths,
 orchestration details) belong in the deployment tooling's
 domain, not the app's README. This is how the same app can be
 picked up and deployed anywhere without its docs arguing with
@@ -848,7 +882,7 @@ loaded for *that* tooling, separate from the app itself.
 
 Some of the connective tissue is retained across sessions by
 the mcp-app admin CLI. Per-app `connect` config persists the
-deployed URL and signing-key access for each app, so returning
+deployed URL for each app, so returning
 to administer an app months later doesn't require
 re-discovering how or where it was deployed. This state lives
 in XDG config paths (`~/.config/{app-name}/setup.json`) —
@@ -894,31 +928,34 @@ Any deployment environment must provide:
 
 - **Start command:** `my-app-mcp serve` (optionally `--host` /
   `--port`, default `0.0.0.0:8080`)
-- **`SIGNING_KEY` env var** — required for HTTP. A secret — must
-  not be committed to the repo or hardcoded in config files.
-  Source it from a secrets store, CI/CD secrets, or have the
-  deployment tool generate it (see Environment Variables above)
+- **`AUTH_ISSUER` and `ADMIN_EMAILS` env vars** — the identity
+  provider and the administrators. Neither is a secret; mcp-app
+  holds no key (see Environment Variables above)
 - **`APP_USERS_PATH` env var** — must point to persistent storage
   for any durable deployment. The default writes to the local
   filesystem, which is ephemeral in containers (see Environment
   Variables above)
 - **MCP endpoint:** `/` (root path). MCP clients connect to
   `https://host:port/`, not `/mcp`
+- **Discovery:** `GET /.well-known/oauth-protected-resource` — no
+  auth; MCP clients read it to find the issuer
 - **Health check:** `GET /health` — no auth, returns
-  `{"status": "ok"}`
+  `{"status": "healthy" | "degraded" | "unhealthy", "checks": {...}}`
 - **Admin API:** `/admin/users` (POST, GET),
   `/admin/users/{email}` (DELETE), `/admin/users/{email}/profile`
-  (GET, PATCH), `/admin/tokens` (POST)
-- **Auth model:** mcp-app handles its own auth via JWT. If the
-  platform has an auth gate (IAM, API gateway, etc.), configure
-  it to allow unauthenticated traffic through to the app
+  (GET, PATCH), `/admin/safe-tool` (GET), `/admin/health` (GET)
+- **Auth model:** mcp-app validates the identity provider's tokens
+  itself. If the platform has an auth gate (IAM, API gateway, etc.),
+  configure it to pass unauthenticated traffic through to the app
+  and to forward the `Host` header unchanged — the public URL and
+  token audience derive from it
 - **Build root:** the repo root where `pyproject.toml` lives
 
 ### Bare metal
 
 ```bash
 pip install -e .
-SIGNING_KEY=your-key my-app-mcp serve
+AUTH_ISSUER=https://login.example.com/ ADMIN_EMAILS=you@example.com my-app-mcp serve
 ```
 
 ### Docker
@@ -935,7 +972,8 @@ CMD ["my-app-mcp", "serve"]
 ```bash
 docker build -t my-app .
 docker run -p 8080:8080 \
-  -e SIGNING_KEY=your-key \
+  -e AUTH_ISSUER=https://login.example.com/ \
+  -e ADMIN_EMAILS=you@example.com \
   -v /persistent/path:/data \
   -e APP_USERS_PATH=/data/users \
   my-app
@@ -947,26 +985,26 @@ ensures user data survives container restarts.
 ### Cloud platforms
 
 Deploy from source or a container image using your platform's
-tooling. Set `SIGNING_KEY` via the platform's secret manager and
-`APP_USERS_PATH` to a persistent volume. Ensure the platform
-allows unauthenticated HTTP traffic through to the app.
+tooling. Set `AUTH_ISSUER` and `ADMIN_EMAILS` as plain environment
+variables and `APP_USERS_PATH` to a persistent volume. Ensure the
+platform allows unauthenticated HTTP traffic through to the app.
+Register the service's public URL as the API identifier at the
+identity provider (see [Authentication](#authentication)).
 
 Deployment tools like [gapp](https://github.com/echomodel/gapp)
-can automate infrastructure, secrets, and container builds.
+can automate infrastructure, volumes, and container builds.
 
 ### Post-deploy verification
 
-**1. Connect** the admin CLI:
+**1. Connect** the admin CLI to the URL:
 ```bash
-my-app-admin connect https://your-service --signing-key xxx
+my-app-admin connect https://your-service
 ```
 
-**2. Register a user** (if none exist yet):
-```bash
-my-app-admin users add alice@example.com
-```
+It saves the URL and prints the deployment's endpoints (MCP, admin,
+discovery, health). No credential is involved.
 
-**3. Probe** — single-command end-to-end verification:
+**2. Probe** — confirm the front door without signing in:
 ```bash
 my-app-admin probe
 ```
@@ -974,88 +1012,62 @@ my-app-admin probe
 Output:
 ```
 URL: https://your-service
+  Endpoints:
+    MCP        https://your-service/           JSON-RPC, bearer token from the identity provider
+    Admin      https://your-service/admin/*    admin REST, an administrator's token
+    Discovery  https://your-service/.well-known/oauth-protected-resource  public
+    Health     https://your-service/health     public
 Health: healthy
-MCP: ok (probed as alice@example.com)
-Tools (3):
-  do_thing
-  list_items
-  get_status
+OAuth: ok — issuer https://login.example.com/, resource https://your-service/
+  Unauthenticated requests get the 401 challenge; an MCP client can
+  discover the issuer and sign the user in. Add the URL in a client to go further.
 ```
 
-Probe hits `/health` for liveness, then does an MCP `tools/list`
-round-trip using a short-lived token minted for an existing user.
-If it reports all tools, the app is fully operational — health,
-admin auth, user auth, MCP layer, and tool wiring all work.
+Probe hits `/health`, reads the discovery document, and checks that
+an unauthenticated MCP request gets the `401` challenge pointing at
+it. If all three pass, the framework layer is up and an MCP client
+can sign a user in. `resource` must be the URL users type; if it
+isn't, the front door is rewriting `Host` — fix the proxy, or pin
+`AUTH_AUDIENCE`.
 
-**4. Inspect what tools the deployment exposes:**
+**3. Sign in as the administrator.** Generate the registration
+commands for your MCP client and run the one for yours:
 ```bash
-my-app-admin tools list
-my-app-admin tools show <name>
+my-app-admin register
 ```
 
-`tools list` enumerates the tools the solution registered. `tools
-show <name>` renders the schema and a copy-pasteable invocation
-example. Useful as a sanity check that the tools module loaded and
-the names match expectations.
+It outputs the commands for Claude Code and Antigravity CLI (`agy`)
+and the URL to add in Claude.ai; none carries a credential. The
+client discovers the issuer from the URL, sends you to sign in, and
+your `ADMIN_EMAILS` entry is admitted on first use. Call a tool.
+That is the end-to-end check: identity provider, token validation,
+user record, MCP layer, and tool wiring all work.
 
-These commands mint a per-user probe token to do the JSON-RPC
-round-trip, so they require at least one registered user (Step 2
-above). On a deployment with no users they exit with a clean error
-pointing at `users add` rather than degrading to liveness only —
-because there's no useful tools-list output without the round-trip.
-`probe` is the right tool for liveness checks pre-registration.
-
-**5. End-to-end smoke test (if the app declared a safe tool):**
-```bash
-my-app-admin safe-tool --invoke
-```
-
-Confirms the full stack — framework + solution-specific tool wiring
-+ upstream credential + response shape. The JSON-RPC request body
-is printed before the call so you can copy and replay it from a
-debugger or another terminal.
-
-`safe-tool --invoke` requires a registered user (same reason as
-`tools list`). The bare `safe-tool` (no `--invoke`) only fetches
-the declaration metadata and works on a fresh deployment with no
-users — handy for confirming the safe tool is declared before
-adding users.
-
-| `probe` | `safe-tool --invoke` | Likely problem |
-|---|---|---|
-| ❌ | n/a | Framework layer (network, signing key, MCP transport) |
-| ✅ | `supported: false` | No safe tool declared. Rely on probe, or declare one. |
-| ✅ | non-200 status | Solution-specific tool failed. Inspect `result.body`. |
-| ✅ | 200 but empty/missing | Tool wired but upstream credential invalid/expired. |
-| ✅ | 200 with expected shape | Full stack verified. Done. |
-
-**6. Debug a specific tool with custom arguments:**
-```bash
-my-app-admin tools call <name> --arg k=v
-my-app-admin tools call <name> --body '{"k": "v"}'
-```
-
-Use when `safe-tool --invoke` failed and you want to isolate the
-issue, or when no safe tool is declared and you want a real
-round-trip. The output includes the wire-level request body so
-you can replay it manually.
-
-**7. Generate MCP client registration commands:**
-```bash
-my-app-admin register --user alice@example.com
-```
-
-This outputs ready-to-paste commands for Claude Code, Antigravity
-CLI (`agy`), and the Claude.ai URL form.
+**4. Register other users** — see [User Management](#user-management).
+They sign in the same way, with their own account.
 
 ## User Management
+
+### Who can sign in
+
+Three kinds of email reach a deployment:
+
+- **Administrators** (`ADMIN_EMAILS`): admitted on first sign-in,
+  record created automatically, may call `/admin`.
+- **Registered users**: anyone an administrator has registered via
+  `POST /admin/users`, with an optional profile.
+- **Everyone else**: the identity provider signs them in, mcp-app
+  answers `403`.
+
+Revoking a user deletes the record; the next request with their
+token is a `403`. Re-registering admits them again.
 
 ### Connect
 
 **Prefer the per-app admin CLI** (`my-app-admin`) over the
 generic CLI (`mcp-app`) whenever possible. The per-app CLI
 stores connection config per app — each app remembers its own
-target (local or remote) and signing key independently in
+target (local or remote) independently in
 `~/.config/{name}/setup.json`. This means you can switch between
 administering different apps without losing connection state,
 and return to an app months later without re-discovering how or
@@ -1068,19 +1080,17 @@ where the per-app admin CLI isn't installed locally.
 
 ```bash
 # Per-app admin CLI (preferred) — local or remote
-my-app-admin connect https://your-service --signing-key xxx
+my-app-admin connect https://your-service
 my-app-admin connect local     # switch to the local store; the remote stays saved
-my-app-admin connect remote    # switch back to the saved remote, no key needed
+my-app-admin connect remote    # switch back to the saved remote
 
 # Generic CLI — remote only, single connection
-mcp-app connect https://your-service --signing-key xxx
+mcp-app connect https://your-service
 ```
 
-Switching to `local` keeps the saved remote URL and signing key, so
-`connect remote` returns to it without re-entering the key.
-`connect <url>` without `--signing-key` reuses the saved key when the URL
-is unchanged; a different URL (or an explicit `--signing-key`) replaces
-it.
+`connect` takes a URL and nothing else: there is no key to supply.
+Switching to `local` keeps the saved remote URL, so `connect remote`
+returns to it.
 
 `connect local` is only available on the per-app admin CLI
 because it needs the app name to locate the filesystem store
@@ -1088,7 +1098,7 @@ because it needs the app name to locate the filesystem store
 which app it's managing, so it only supports remote targets.
 
 Connection config is set once and never repeated. No other
-command accepts `--url` or `--signing-key`.
+command accepts `--url`.
 
 **Note:** the framework tracks one saved remote per app plus the
 local store. If you deploy the same app to staging and production,
@@ -1126,24 +1136,25 @@ my-app-admin users get-profile alice@example.com
 # Update a single profile field
 my-app-admin users update-profile alice@example.com api_key new-key
 
-# Revoke a user (invalidates all their tokens)
+# Revoke a user (their next request is a 403)
 my-app-admin users revoke alice@example.com
-
-# Issue a new token for an existing user
-my-app-admin tokens create alice@example.com
 
 # Health check (remote only)
 my-app-admin health
 ```
 
-The token returned from `users add` or `tokens create` is what
-the user puts in their MCP client configuration.
+These commands run against the local store after `connect local`.
+Against a deployment the CLI does not yet sign in, so the remote
+forms exit with a message to that effect (see [Admin
+Endpoints](#admin-endpoints) for how `/admin` is reached today).
+No command prints a token: a user's credential is the sign-in their
+MCP client performs with the identity provider.
 
 ## MCP Client Configuration
 
 ### stdio (local)
 
-No signing key needed — stdio has no JWT auth.
+No identity provider involved — stdio has no auth; `--user` names the local record.
 
 **CLI registration:**
 ```bash
@@ -1165,14 +1176,17 @@ agy mcp add my-app -- my-app-mcp stdio --user local
 
 ### HTTP (remote)
 
+The client needs the URL and nothing else. On first use it reads the
+discovery document, registers itself with the identity provider, and
+signs the user in. `my-app-admin register` prints exactly these
+forms for the connected deployment.
+
 **CLI registration:**
 ```bash
-claude mcp add --transport http my-app \
-  https://your-service/ \
-  --header "Authorization: Bearer USER_TOKEN"
+claude mcp add --transport http -s user my-app https://your-service/
 
-# agy: flags go before the name; one user-level config, no scopes
-agy mcp add --header "Authorization: Bearer USER_TOKEN" my-app https://your-service/
+# agy: one user-level config, no scopes
+agy mcp add my-app https://your-service/
 ```
 
 **Manual config** (`~/.claude.json` shown; agy's `~/.gemini/config/mcp_config.json`
@@ -1181,26 +1195,22 @@ uses the same layout but names the URL key `serverUrl`):
 {
   "mcpServers": {
     "my-app": {
-      "url": "https://your-service/",
-      "headers": {
-        "Authorization": "Bearer ${MY_APP_TOKEN}"
-      }
+      "url": "https://your-service/"
     }
   }
 }
 ```
 
-Claude Code supports `${VAR}` expansion in config files —
-reference a host environment variable instead of pasting the
-token directly.
-
-**Claude.ai / Claude mobile (remote via URL):**
+**Claude.ai / Claude mobile:** Settings → Connectors → Add custom
+connector, with the URL:
 ```
-https://your-service/?token=USER_TOKEN
+https://your-service/
 ```
 
 Remote MCP servers added through Claude.ai are available across
-all Claude clients — web, mobile, and Claude Code.
+all Claude clients — web, mobile, and Claude Code. No token ever
+appears in a config file; the client holds what the identity
+provider issued and refreshes it itself.
 
 ## Architecture
 
@@ -1218,8 +1228,10 @@ App(name="my-app", tools_module=tools)
 ## Free Tests for Your App
 
 mcp-app ships reusable test modules that check auth, user admin,
-JWT enforcement, CLI wiring, and tool protocol compliance against
-your specific app. Import them in two files, provide your `App`
+token validation, CLI wiring, and tool protocol compliance against
+your specific app. They run against a stand-in identity provider
+(`mcp_app.testing.issuer.TestIssuer`), so no real issuer and no
+network is involved. Import them in two files, provide your `App`
 object as a fixture, and get 25+ tests for free.
 
 ### 1. Create `tests/framework/conftest.py`
@@ -1263,7 +1275,7 @@ One agent skill ships with this repo:
 the whole life of an app built on this framework: authoring,
 migration, review, framework upgrades, testing, the deploy
 boundary, and operating a deployed instance (connect, verify,
-users, tokens, MCP client registration, troubleshooting).
+users, MCP client registration, troubleshooting).
 
 The skill follows the [agentskills.io](https://agentskills.io)
 format with progressive disclosure. `SKILL.md` is short: a fit

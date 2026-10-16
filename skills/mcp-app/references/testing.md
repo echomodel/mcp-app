@@ -6,8 +6,9 @@ mcp-app ships, or agent evals. After building or changing a solution, write
 tests and validate both transports before presenting the compliance
 dashboard (`review-checklist.md`).
 
-Step 2 mints an admin JWT with the signing key. That is part of the
-current auth model; `auth.md` describes it.
+Step 2 runs the HTTP stack against a stand-in identity provider that
+mcp-app ships (`mcp_app.testing.issuer.TestIssuer`). That is the only
+place tests touch the auth model; `auth.md` describes the model.
 
 ## Step 0: Verify the local install reflects the working tree
 
@@ -119,27 +120,18 @@ dependency of mcp-app — the solution gets it for free.
 
 ```python
 import httpx
-import jwt as pyjwt
-from datetime import datetime, timezone, timedelta
+import pytest
 from my_app import app
+from mcp_app.testing.fixtures import OPERATOR, issuer, mcp_running, oauth_env  # noqa: F401
 
 @pytest.fixture
-def app_client(tmp_path):
-    os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
-    os.environ["SIGNING_KEY"] = "test-key"
+def app_client(oauth_env):
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 @pytest.mark.asyncio
-async def test_register_and_call_tool(app_client):
-    admin_token = pyjwt.encode(
-        {"sub": "admin", "scope": "admin",
-         "iat": datetime.now(timezone.utc),
-         "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
-        "test-key", algorithm="HS256",
-    )
-    headers = {"Authorization": f"Bearer {admin_token}"}
-
+async def test_register_and_list(app_client, oauth_env):
+    headers = oauth_env.headers(OPERATOR)          # an ADMIN_EMAILS entry
     resp = await app_client.post(
         "/admin/users",
         json={"email": "user@example.com",
@@ -147,8 +139,41 @@ async def test_register_and_call_tool(app_client):
         headers=headers,
     )
     assert resp.status_code == 200
-    assert "token" in resp.json()  # the mcp-app JWT for this user
+    assert resp.json() == {"email": "user@example.com", "registered": True}
+
+@pytest.mark.asyncio
+async def test_registered_user_can_call_a_tool(app_client, oauth_env):
+    body = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+    headers = {**oauth_env.headers(OPERATOR),
+               "Accept": "application/json, text/event-stream"}
+    async with mcp_running(app, app_client):      # starts the SDK session manager
+        resp = await app_client.post("/", json=body, headers=headers)
+    assert resp.status_code == 200
+
+@pytest.mark.asyncio
+async def test_unregistered_user_is_refused(app_client, oauth_env):
+    resp = await app_client.post("/", json={}, headers=oauth_env.headers("nobody@example.com"))
+    assert resp.status_code == 403
 ```
+
+What the fixtures do:
+
+- `issuer` (session-scoped) generates one RSA key and signs tokens the
+  way an authorization server would.
+- `oauth_env` sets `APP_USERS_PATH` to a temp dir and `ADMIN_EMAILS` to
+  `OPERATOR`, and hands the issuer's key set to the `App`
+  (`OAuthResourceServer(jwks=...)`), so the real verifier checks real
+  signatures with no network. It yields the issuer:
+  `oauth_env.headers(email)` or `oauth_env.token(email, expired=True,
+  audience=...)`.
+- `mcp_running` starts the MCP SDK's session manager, which httpx's
+  ASGI transport doesn't (no lifespan). Needed only for requests that
+  pass the identity gate and reach a tool.
+- Tokens carry `aud` = `http://test/`, the client's base URL, because the
+  server derives its audience from the request's `Host`.
+
+No app-specific auth env vars are needed in tests; the two the fixture
+sets are the two a deployment sets.
 
 ## Step 3: stdio validation
 
@@ -231,8 +256,8 @@ All tests must pass before the compliance dashboard.
 ## Step 5: mcp-app framework test suite
 
 mcp-app ships reusable tests that check auth enforcement,
-user admin, JWT handling, CLI wiring, tool protocol compliance,
-and SDK test coverage — against YOUR app. These are the
+user admin, token validation, CLI wiring, tool protocol compliance,
+and SDK test coverage — against YOUR app, using the same test issuer. These are the
 authoritative verification that the app is correctly built on
 the framework.
 

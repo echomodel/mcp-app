@@ -1,130 +1,80 @@
 """Tests for probe and register commands.
 
-Probe: exercises /health + MCP tools/list round-trip through the full
-in-memory ASGI stack.
+Probe: verifies the OAuth front door through the full in-memory ASGI
+stack without any sign-in.
 
 Register: exercises command generation (pure logic, no network).
 """
 
-import os
-import json
-import pytest
 import httpx
-from datetime import datetime, timezone
+import pytest
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
-from starlette.routing import Mount, Route
+from starlette.routing import Route
 
-from mcp_app.admin import create_admin_app
+from mcp_app import App
 from mcp_app.admin_client import RemoteAuthAdapter
-from mcp_app.bridge import DataStoreAuthAdapter
-from mcp_app.data_store import FileSystemUserDataStore
-from mcp_app.models import UserAuthRecord
-from mcp_app.registration import (
-    generate_registrations,
-    format_registrations,
-    TOKEN_PLACEHOLDER,
-)
+from mcp_app.registration import format_registrations, generate_registrations
 
-
-SIGNING_KEY = "test-key-probe-register-32char!"
 BASE_URL = "http://test"
 
 
-# --- Fixtures ---
-
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
-    monkeypatch.setenv("SIGNING_KEY", SIGNING_KEY)
-    return FileSystemUserDataStore(app_name="test")
+def full_stack(auth_env, issuer):
+    """Full ASGI app with MCP tools; the session manager is started per test."""
+    from fixture_app import tools
 
-
-@pytest.fixture
-def _mcp_app_components(store, monkeypatch):
-    """Build full ASGI app with MCP tools but don't start session manager."""
-    import importlib
-    import sys
-    fixture_path = os.path.join(os.path.dirname(__file__), "..", "fixture_app")
-    sys.path.insert(0, os.path.abspath(fixture_path))
-    try:
-        tools = importlib.import_module("fixture_app.tools")
-    finally:
-        sys.path.pop(0)
-
-    from mcp_app import App
-    monkeypatch.setenv("SIGNING_KEY", SIGNING_KEY)
-    app = App(name="test", tools_module=tools)
+    app = App(name="test", tools_module=tools, auth=issuer.config)
     app._asgi = app._build_asgi()
     transport = httpx.ASGITransport(app=app)
     http_client = httpx.AsyncClient(transport=transport, base_url=BASE_URL)
-    adapter = RemoteAuthAdapter(BASE_URL, SIGNING_KEY, http_client=http_client)
-    return adapter, app._mcp
+    return RemoteAuthAdapter(BASE_URL, http_client=http_client), app._mcp
 
 
 @pytest.fixture
-def adapter_health_only(store):
-    """Adapter backed by health + admin only — no MCP mount."""
-    auth_store = DataStoreAuthAdapter(store)
-    admin_app = create_admin_app(auth_store)
+def health_only():
+    """A server with health but no OAuth front door at all."""
 
     async def health(request):
         return JSONResponse({"status": "ok"})
 
-    app = Starlette(routes=[
-        Route("/health", health),
-        Mount("/admin", app=admin_app),
-    ])
+    app = Starlette(routes=[Route("/health", health)])
     transport = httpx.ASGITransport(app=app)
     http_client = httpx.AsyncClient(transport=transport, base_url=BASE_URL)
-    return RemoteAuthAdapter(BASE_URL, SIGNING_KEY, http_client=http_client)
+    return RemoteAuthAdapter(BASE_URL, http_client=http_client)
 
 
 # --- Probe tests ---
 
 @pytest.mark.asyncio
-async def test_probe_health_only_no_users(adapter_health_only):
-    result = await adapter_health_only.probe()
-    assert result["health"]["status"] == "healthy"
-    assert result["mcp"]["status"] == "skipped"
-    assert "no registered users" in result["mcp"]["reason"]
-    assert result["tools"] is None
-
-
-@pytest.mark.asyncio
-async def test_probe_health_only_with_user(adapter_health_only):
-    await adapter_health_only.save(
-        UserAuthRecord(email="alice@test.com", created=datetime.now(timezone.utc)),
-    )
-    result = await adapter_health_only.probe()
-    assert result["health"]["status"] == "healthy"
-    assert result["mcp"]["probed_as"] == "alice@test.com"
-
-
-@pytest.mark.asyncio
-async def test_probe_explicit_user(adapter_health_only):
-    await adapter_health_only.save(
-        UserAuthRecord(email="alice@test.com", created=datetime.now(timezone.utc)),
-    )
-    await adapter_health_only.save(
-        UserAuthRecord(email="bob@test.com", created=datetime.now(timezone.utc)),
-    )
-    result = await adapter_health_only.probe(user_email="bob@test.com")
-    assert result["mcp"]["probed_as"] == "bob@test.com"
-
-
-@pytest.mark.asyncio
-async def test_probe_full_stack_lists_tools(_mcp_app_components):
-    adapter, mcp = _mcp_app_components
-    await adapter.save(
-        UserAuthRecord(email="alice@test.com", created=datetime.now(timezone.utc)),
-    )
+async def test_probe_verifies_oauth_front_door_without_sign_in(full_stack, issuer):
+    adapter, mcp = full_stack
     async with mcp.session_manager.run():
         result = await adapter.probe()
     assert result["health"]["status"] == "healthy"
-    assert result["mcp"]["status"] == "ok"
-    assert isinstance(result["tools"], list)
-    assert len(result["tools"]) > 0
+    assert result["oauth"]["status"] == "ok"
+    assert result["oauth"]["issuer"] == issuer.issuer
+    assert result["oauth"]["resource"] == "http://test/"
+    assert "resource_metadata=" in result["oauth"]["challenge"]
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_missing_front_door(health_only):
+    result = await health_only.probe()
+    assert result["health"]["status"] == "healthy"
+    assert result["oauth"]["status"] == "error"
+    assert result["oauth"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_probe_unreachable():
+    def refuse(request):
+        raise httpx.ConnectError("refused")
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(refuse), base_url=BASE_URL)
+    result = await RemoteAuthAdapter(BASE_URL, http_client=http_client).probe()
+    assert result["health"]["status"] == "unreachable"
+    assert result["oauth"] is None
 
 
 # --- Registration tests ---
@@ -135,29 +85,21 @@ class TestGenerateRegistrations:
         reg = generate_registrations(name="my-app", url="https://my-app.example.com/")
         assert reg["url"] == "https://my-app.example.com/"
         assert reg["name"] == "my-app"
-        assert reg["token_provided"] is False
         entries = reg["entries"]
         clients_scopes = [(e["client"], e["scope"]) for e in entries]
         assert ("claude", "user") in clients_scopes
         assert ("claude", "project") in clients_scopes
         assert ("agy", None) in clients_scopes
-        assert not any(c == "gemini" for c, _ in clients_scopes)
         assert ("claude.ai", None) in clients_scopes
         for e in entries:
-            if e["client"] != "claude.ai":
-                assert TOKEN_PLACEHOLDER in e["command"]
+            assert "Bearer" not in e["command"], "no credential belongs in a registration command"
+            assert "token" not in e["command"]
 
     def test_url_gets_trailing_slash(self):
         reg = generate_registrations(name="x", url="https://my-app.example.com")
         assert reg["url"].endswith("/")
         for e in reg["entries"]:
             assert "https://my-app.example.com/" in e["command"]
-
-    def test_with_token(self):
-        reg = generate_registrations(name="x", url="https://a.com/", token="tok123")
-        assert reg["token_provided"] is True
-        for e in reg["entries"]:
-            assert "tok123" in e["command"]
 
     def test_filter_client(self):
         reg = generate_registrations(name="x", url="https://a.com/", clients=["claude"])
@@ -170,20 +112,24 @@ class TestGenerateRegistrations:
             if e["client"] == "claude":
                 assert e["scope"] == "user"
 
-    def test_claude_ai_has_token_in_url(self):
-        reg = generate_registrations(name="x", url="https://a.com/", token="t")
-        ai = [e for e in reg["entries"] if e["client"] == "claude.ai"]
-        assert len(ai) == 1
-        assert "token=t" in ai[0]["command"]
+    def test_claude_ai_is_just_the_url(self):
+        reg = generate_registrations(name="x", url="https://a.com/", clients=["claude.ai"])
+        [entry] = reg["entries"]
+        assert entry["command"] == "https://a.com/"
+
+    def test_claude_code_command(self):
+        reg = generate_registrations(name="my-app", url="https://a.com/", clients=["claude"], scopes=["user"])
+        [entry] = reg["entries"]
+        assert entry["command"] == "claude mcp add --transport http -s user my-app https://a.com/"
 
 
 class TestAgyRegistration:
 
-    def test_agy_command_puts_flags_before_name(self):
-        reg = generate_registrations(name="my-app", url="https://a.com/", token="t", clients=["agy"])
+    def test_agy_command_puts_name_then_url(self):
+        reg = generate_registrations(name="my-app", url="https://a.com/", clients=["agy"])
         [entry] = reg["entries"]
         assert entry["scope"] is None
-        assert entry["command"] == 'agy mcp add --header "Authorization: Bearer t" my-app https://a.com/'
+        assert entry["command"] == "agy mcp add my-app https://a.com/"
 
     def test_agy_ignores_scope_filter(self):
         reg = generate_registrations(name="x", url="https://a.com/", clients=["agy"], scopes=["project"])
@@ -202,6 +148,7 @@ class TestFormatRegistrations:
         assert "claude" in text
         assert "agy" in text
         assert "claude.ai" in text
+        assert "signs the user in" in text
 
     def test_output_shows_manual_for_claude_ai(self):
         reg = generate_registrations(name="x", url="https://a.com/", clients=["claude.ai"])

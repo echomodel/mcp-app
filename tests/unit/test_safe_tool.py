@@ -3,8 +3,6 @@ CLI command, and the structured envelope schema.
 """
 
 import json
-import os
-from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -16,25 +14,26 @@ from starlette.routing import Mount, Route
 from mcp_app import App, SafeTool
 from mcp_app.admin import create_admin_app, SAFE_TOOL_SCHEMA_VERSION
 from mcp_app.admin_client import RemoteAuthAdapter
+from mcp_app.auth import OAuthAdminAuth, OIDCTokenVerifier
 from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
-from mcp_app.models import UserAuthRecord
 
+from .conftest import OPERATOR
 
-SIGNING_KEY = "test-key-safe-tool-32chars-min!!"
 BASE_URL = "http://test"
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
-    monkeypatch.setenv("SIGNING_KEY", SIGNING_KEY)
+def store(auth_env):
     return FileSystemUserDataStore(app_name="test")
 
 
-def _admin_only_app(store, safe_tool=None):
+def _admin_only_app(store, issuer, safe_tool=None):
     auth_store = DataStoreAuthAdapter(store)
-    admin_app = create_admin_app(auth_store, safe_tool=safe_tool)
+    verifier = OIDCTokenVerifier(issuer.config, auth_store)
+    admin_app = create_admin_app(
+        auth_store, admin_auth=OAuthAdminAuth(verifier), safe_tool=safe_tool
+    )
 
     async def health(request):
         return JSONResponse({"status": "ok"})
@@ -45,25 +44,25 @@ def _admin_only_app(store, safe_tool=None):
     ])
 
 
-@pytest.fixture
-def adapter_no_safe_tool(store):
-    app = _admin_only_app(store)
+def _adapter(app, issuer):
     transport = httpx.ASGITransport(app=app)
     http_client = httpx.AsyncClient(transport=transport, base_url=BASE_URL)
-    return RemoteAuthAdapter(BASE_URL, SIGNING_KEY, http_client=http_client)
+    return RemoteAuthAdapter(BASE_URL, issuer.token(OPERATOR), http_client=http_client)
 
 
 @pytest.fixture
-def adapter_with_safe_tool(store):
+def adapter_no_safe_tool(store, issuer):
+    return _adapter(_admin_only_app(store, issuer), issuer)
+
+
+@pytest.fixture
+def adapter_with_safe_tool(store, issuer):
     safe_tool = SafeTool(
         name="ping",
         arguments={},
         description="returns a static health response",
     )
-    app = _admin_only_app(store, safe_tool=safe_tool)
-    transport = httpx.ASGITransport(app=app)
-    http_client = httpx.AsyncClient(transport=transport, base_url=BASE_URL)
-    return RemoteAuthAdapter(BASE_URL, SIGNING_KEY, http_client=http_client)
+    return _adapter(_admin_only_app(store, issuer, safe_tool=safe_tool), issuer)
 
 
 # --- Endpoint tests ---
@@ -89,9 +88,9 @@ async def test_safe_tool_endpoint_supported_envelope(adapter_with_safe_tool):
 
 
 @pytest.mark.asyncio
-async def test_safe_tool_endpoint_requires_admin_auth(store):
-    """Without a valid admin token the endpoint must return 403."""
-    app = _admin_only_app(store, safe_tool=SafeTool("ping", {}, "x"))
+async def test_safe_tool_endpoint_requires_admin_auth(store, issuer):
+    """Without an administrator's token the endpoint must return 403."""
+    app = _admin_only_app(store, issuer, safe_tool=SafeTool("ping", {}, "x"))
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as http_client:
         resp = await http_client.get("/admin/safe-tool")
@@ -101,42 +100,30 @@ async def test_safe_tool_endpoint_requires_admin_auth(store):
 # --- Full-stack tests (with MCP) ---
 
 @pytest.fixture
-def full_stack(tmp_path, monkeypatch):
+def full_stack(auth_env, issuer):
     """Full ASGI app with MCP wired and a declared safe tool."""
-    import importlib
-    import sys
-    fixture_path = os.path.join(os.path.dirname(__file__), "..", "fixture_app")
-    sys.path.insert(0, os.path.abspath(fixture_path))
-    try:
-        tools = importlib.import_module("fixture_app.tools")
-    finally:
-        sys.path.pop(0)
-
-    monkeypatch.setenv("SIGNING_KEY", SIGNING_KEY)
-    monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
+    from fixture_app import tools
 
     app = App(
         name="test",
         tools_module=tools,
         safe_tool=SafeTool(name="ping", arguments={}, description="health"),
+        auth=issuer.config,
     )
     app._asgi = app._build_asgi()
     transport = httpx.ASGITransport(app=app)
     http_client = httpx.AsyncClient(transport=transport, base_url=BASE_URL)
-    adapter = RemoteAuthAdapter(BASE_URL, SIGNING_KEY, http_client=http_client)
+    adapter = RemoteAuthAdapter(BASE_URL, issuer.token(OPERATOR), http_client=http_client)
     return adapter, app._mcp
 
 
 @pytest.mark.asyncio
 async def test_call_tool_round_trip_against_safe_tool(full_stack):
+    """The operator, admitted by ADMIN_EMAILS, invokes the safe tool as themselves."""
     adapter, mcp = full_stack
-    await adapter.save(
-        UserAuthRecord(email="alice@test.com", created=datetime.now(timezone.utc)),
-    )
     async with mcp.session_manager.run():
         result = await adapter.call_tool("ping", {})
 
-    assert result["probed_as"] == "alice@test.com"
     assert result["result"]["status_code"] == 200
     response_body = result["result"]["body"]
     assert "result" in response_body
@@ -163,9 +150,8 @@ def _mock_envelope_adapter(envelope, call_result=None):
         async def aclose(self_):
             type(self_).closed = True
 
-        async def call_tool(self_, name, arguments, user_email=None):
+        async def call_tool(self_, name, arguments):
             return call_result or {
-                "probed_as": user_email or "alice@test.com",
                 "invocation": {
                     "method": "POST",
                     "url": "http://test/",
@@ -236,7 +222,6 @@ def test_safe_tool_invoke_prints_request_before_response(monkeypatch, tmp_path):
     runner = CliRunner()
     result = runner.invoke(admin_cli, ["safe-tool", "--invoke"])
     assert result.exit_code == 0, result.output
-    # Request lines (>) appear before response lines (<).
     out = result.output
     first_req = out.find("> POST")
     first_resp = out.find("< 200")

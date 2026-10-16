@@ -5,56 +5,39 @@ CLI-level rendering and argument coercion.
 """
 
 import json
-import os
-from datetime import datetime, timezone
 
 import httpx
 import pytest
 from click.testing import CliRunner
 
 from mcp_app import App
-from mcp_app.admin_client import RemoteAuthAdapter
-from mcp_app.models import UserAuthRecord
+from mcp_app.admin_client import NotSignedInError, RemoteAuthAdapter
 
+from .conftest import OPERATOR
 
-SIGNING_KEY = "test-key-tools-subcommand-32chr!"
 BASE_URL = "http://test"
 
 
 @pytest.fixture
-def full_stack(tmp_path, monkeypatch):
-    import importlib
-    import sys
-    fixture_path = os.path.join(os.path.dirname(__file__), "..", "fixture_app")
-    sys.path.insert(0, os.path.abspath(fixture_path))
-    try:
-        tools = importlib.import_module("fixture_app.tools")
-    finally:
-        sys.path.pop(0)
+def full_stack(auth_env, issuer):
+    from fixture_app import tools
 
-    monkeypatch.setenv("SIGNING_KEY", SIGNING_KEY)
-    monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
-
-    app = App(name="test", tools_module=tools)
+    app = App(name="test", tools_module=tools, auth=issuer.config)
     app._asgi = app._build_asgi()
     transport = httpx.ASGITransport(app=app)
     http_client = httpx.AsyncClient(transport=transport, base_url=BASE_URL)
-    adapter = RemoteAuthAdapter(BASE_URL, SIGNING_KEY, http_client=http_client)
-    return adapter, app._mcp
+    adapter = RemoteAuthAdapter(BASE_URL, issuer.token(OPERATOR), http_client=http_client)
+    return adapter, app._mcp, http_client
 
 
 # --- Adapter-level tests (direct round-trip) ---
 
 @pytest.mark.asyncio
 async def test_list_tools_returns_full_dicts(full_stack):
-    adapter, mcp = full_stack
-    await adapter.save(
-        UserAuthRecord(email="alice@test.com", created=datetime.now(timezone.utc)),
-    )
+    adapter, mcp, _ = full_stack
     async with mcp.session_manager.run():
-        tools, probed_as = await adapter.list_tools()
+        tools = await adapter.list_tools()
 
-    assert probed_as == "alice@test.com"
     names = {t["name"] for t in tools}
     assert {"ping", "greet"}.issubset(names)
     # Each tool dict carries a description and inputSchema (per MCP).
@@ -65,10 +48,7 @@ async def test_list_tools_returns_full_dicts(full_stack):
 
 @pytest.mark.asyncio
 async def test_call_tool_with_arguments_round_trip(full_stack):
-    adapter, mcp = full_stack
-    await adapter.save(
-        UserAuthRecord(email="alice@test.com", created=datetime.now(timezone.utc)),
-    )
+    adapter, mcp, _ = full_stack
     async with mcp.session_manager.run():
         result = await adapter.call_tool("greet", {"name": "world"})
 
@@ -76,27 +56,27 @@ async def test_call_tool_with_arguments_round_trip(full_stack):
     body = result["result"]["body"]
     content = body["result"]["content"]
     assert any("world" in str(c) for c in content)
+    # The operator acted as themselves.
+    assert any(OPERATOR in str(c) for c in content)
 
 
 @pytest.mark.asyncio
-async def test_list_tools_no_users_raises_typed_exception(full_stack):
-    """Adapter raises NoProbeUserError specifically — not bare RuntimeError —
+async def test_list_tools_without_token_raises_typed_exception(full_stack):
+    """Adapter raises NotSignedInError specifically — not bare RuntimeError —
     so CLI helpers can catch it without swallowing other failures."""
-    from mcp_app.admin_client import NoProbeUserError
-    adapter, _ = full_stack
-    with pytest.raises(NoProbeUserError) as exc_info:
-        await adapter.list_tools()
-    # The message must point the operator at the corrective action.
-    assert "users add" in str(exc_info.value)
+    _, _, http_client = full_stack
+    anonymous = RemoteAuthAdapter(BASE_URL, http_client=http_client)
+    with pytest.raises(NotSignedInError) as exc_info:
+        await anonymous.list_tools()
+    assert "signed in" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
-async def test_call_tool_no_users_raises_typed_exception(full_stack):
-    from mcp_app.admin_client import NoProbeUserError
-    adapter, _ = full_stack
-    with pytest.raises(NoProbeUserError) as exc_info:
-        await adapter.call_tool("ping", {})
-    assert "users add" in str(exc_info.value)
+async def test_call_tool_without_token_raises_typed_exception(full_stack):
+    _, _, http_client = full_stack
+    anonymous = RemoteAuthAdapter(BASE_URL, http_client=http_client)
+    with pytest.raises(NotSignedInError):
+        await anonymous.call_tool("ping", {})
 
 
 # --- Argument coercion tests ---
@@ -140,12 +120,11 @@ class _StubAdapter:
         self._tools = tools or []
         self._call_response = call_response
 
-    async def list_tools(self, user_email=None):
-        return self._tools, user_email or "alice@test.com"
+    async def list_tools(self):
+        return self._tools
 
-    async def call_tool(self, name, arguments, user_email=None):
+    async def call_tool(self, name, arguments):
         return self._call_response or {
-            "probed_as": user_email or "alice@test.com",
             "invocation": {
                 "method": "POST",
                 "url": "http://test/",
@@ -158,9 +137,6 @@ class _StubAdapter:
         }
 
     async def aclose(self):
-        # Stub mirrors RemoteAuthAdapter.aclose() so the CLI's
-        # single-loop close pattern (added to dodge Python 3.14 strict
-        # asyncio teardown) works against the stub too.
         pass
 
 
@@ -198,7 +174,6 @@ def test_tools_list_json(monkeypatch):
     assert result.exit_code == 0, result.output
     parsed = json.loads(result.output)
     assert parsed["tools"][0]["name"] == "ping"
-    assert parsed["probed_as"]
 
 
 def test_tools_show_renders_schema_and_example(monkeypatch):
@@ -223,7 +198,6 @@ def test_tools_show_renders_schema_and_example(monkeypatch):
     assert "item_id" in result.output
     assert "required" in result.output
     assert "optional" in result.output
-    # Example invocation block
     assert "tools call update_item" in result.output
 
 
@@ -283,7 +257,6 @@ def test_tools_call_with_body_json(monkeypatch):
     result = runner.invoke(admin_cli, ["tools", "call", "complex",
                                        "--body", '{"a": 1, "b": [1,2,3]}'])
     assert result.exit_code == 0, result.output
-    # The arguments dict round-trips into the printed request body.
     assert '"a": 1' in result.output
     assert '"b"' in result.output
 
@@ -302,112 +275,68 @@ def test_tools_call_unknown_tool_errors_when_using_args(monkeypatch):
     assert "unknown tool" in msg
 
 
-# --- CLI-level tests for the empty-deployment (no users) state ---
+# --- CLI-level tests for a connection with no sign-in ---
 
-class _NoUsersAdapter:
-    """Stub that mimics what every adapter method does when the
-    deployment has no registered users to mint a probe token for."""
+class _NotSignedInAdapter:
+    """Stub mirroring an adapter that holds no administrator token."""
 
-    async def list_tools(self, user_email=None):
-        from mcp_app.admin_client import NoProbeUserError
-        raise NoProbeUserError(
-            "No registered users on this deployment — cannot mint a "
-            "probe token. Register one first with `users add <email>`."
-        )
+    async def list_tools(self):
+        raise NotSignedInError()
 
-    async def call_tool(self, name, arguments, user_email=None):
-        from mcp_app.admin_client import NoProbeUserError
-        raise NoProbeUserError(
-            "No registered users on this deployment — cannot mint a "
-            "token to invoke a tool. Register one first with "
-            "`users add <email>`."
-        )
+    async def call_tool(self, name, arguments):
+        raise NotSignedInError()
 
     async def get_safe_tool(self):
-        # safe-tool metadata fetch always succeeds — only the --invoke
-        # path needs a probe user. Mirror admin.py's "supported" envelope.
-        return {
-            "schema_version": "1",
-            "supported": True,
-            "tool": {"name": "ping", "description": "ok", "arguments": {}},
-        }
+        raise NotSignedInError()
 
     async def aclose(self):
-        # See _StubAdapter.aclose for rationale.
         pass
 
 
-def _no_users_stub():
-    adapter = _NoUsersAdapter()
+def _not_signed_in_stub():
+    adapter = _NotSignedInAdapter()
     return lambda app_name: adapter
 
 
-def _assert_no_stack_trace(output: str):
-    # Click formats ClickException as "Error: <message>". A bubbled
-    # RuntimeError would surface as a Python traceback containing
-    # 'Traceback (most recent call last):'. We must never see the latter.
-    assert "Traceback" not in output, (
-        f"Stack trace leaked to operator output:\n{output}"
-    )
-
-
-def test_tools_list_no_users_clean_error(monkeypatch):
-    from mcp_app import cli as cli_mod
-    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _no_users_stub())
-    admin_cli = cli_mod.create_admin_cli("myapp")
-    runner = CliRunner()
-    result = runner.invoke(admin_cli, ["tools", "list"])
-    assert result.exit_code != 0
+def _assert_clean_sign_in_error(result):
     out = result.output + (result.stderr or "")
-    _assert_no_stack_trace(out)
-    assert "users add" in out
-
-
-def test_tools_show_no_users_clean_error(monkeypatch):
-    from mcp_app import cli as cli_mod
-    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _no_users_stub())
-    admin_cli = cli_mod.create_admin_cli("myapp")
-    runner = CliRunner()
-    result = runner.invoke(admin_cli, ["tools", "show", "ping"])
     assert result.exit_code != 0
-    out = result.output + (result.stderr or "")
-    _assert_no_stack_trace(out)
-    assert "users add" in out
+    assert "Traceback" not in out, f"Stack trace leaked to operator output:\n{out}"
+    assert "signed in as an administrator" in out
+    assert "connect local" in out
 
 
-def test_tools_call_no_users_clean_error_with_args(monkeypatch):
+def test_tools_list_not_signed_in_clean_error(monkeypatch):
     from mcp_app import cli as cli_mod
-    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _no_users_stub())
-    admin_cli = cli_mod.create_admin_cli("myapp")
-    runner = CliRunner()
-    result = runner.invoke(admin_cli, ["tools", "call", "ping", "--arg", "k=v"])
-    assert result.exit_code != 0
-    out = result.output + (result.stderr or "")
-    _assert_no_stack_trace(out)
-    assert "users add" in out
+    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _not_signed_in_stub())
+    result = CliRunner().invoke(cli_mod.create_admin_cli("myapp"), ["tools", "list"])
+    _assert_clean_sign_in_error(result)
 
 
-def test_tools_call_no_users_clean_error_with_body(monkeypatch):
-    """The --body path skips the schema lookup and goes straight to
-    call_tool. The no-users error must still surface cleanly."""
+def test_tools_show_not_signed_in_clean_error(monkeypatch):
     from mcp_app import cli as cli_mod
-    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _no_users_stub())
-    admin_cli = cli_mod.create_admin_cli("myapp")
-    runner = CliRunner()
-    result = runner.invoke(admin_cli, ["tools", "call", "ping", "--body", "{}"])
-    assert result.exit_code != 0
-    out = result.output + (result.stderr or "")
-    _assert_no_stack_trace(out)
-    assert "users add" in out
+    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _not_signed_in_stub())
+    result = CliRunner().invoke(cli_mod.create_admin_cli("myapp"), ["tools", "show", "ping"])
+    _assert_clean_sign_in_error(result)
 
 
-def test_safe_tool_invoke_no_users_clean_error(monkeypatch):
+def test_tools_call_not_signed_in_clean_error_with_args(monkeypatch):
     from mcp_app import cli as cli_mod
-    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _no_users_stub())
-    admin_cli = cli_mod.create_admin_cli("myapp")
-    runner = CliRunner()
-    result = runner.invoke(admin_cli, ["safe-tool", "--invoke"])
-    assert result.exit_code != 0
-    out = result.output + (result.stderr or "")
-    _assert_no_stack_trace(out)
-    assert "users add" in out
+    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _not_signed_in_stub())
+    result = CliRunner().invoke(cli_mod.create_admin_cli("myapp"), ["tools", "call", "ping", "--arg", "k=v"])
+    _assert_clean_sign_in_error(result)
+
+
+def test_tools_call_not_signed_in_clean_error_with_body(monkeypatch):
+    """The --body path skips the schema lookup and goes straight to call_tool."""
+    from mcp_app import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _not_signed_in_stub())
+    result = CliRunner().invoke(cli_mod.create_admin_cli("myapp"), ["tools", "call", "ping", "--body", "{}"])
+    _assert_clean_sign_in_error(result)
+
+
+def test_safe_tool_not_signed_in_clean_error(monkeypatch):
+    from mcp_app import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_require_remote_adapter", _not_signed_in_stub())
+    result = CliRunner().invoke(cli_mod.create_admin_cli("myapp"), ["safe-tool", "--invoke"])
+    _assert_clean_sign_in_error(result)

@@ -26,22 +26,16 @@ from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Mount, Route
 
 from mcp_app.admin import create_admin_app
-from mcp_app.auth import (
-    OAuthAdminAuth,
-    OAuthResourceServer,
-    OIDCTokenVerifier,
-    SharedSecretJWT,
-)
+from mcp_app.auth import OAuthAdminAuth, OAuthResourceServer, OIDCTokenVerifier
 from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
 from mcp_app.health_check import build_health_response
-from mcp_app.middleware import JWTMiddleware, OAuthMiddleware
+from mcp_app.middleware import OAuthMiddleware
 from mcp_app.storage_check import verify_storage
-from mcp_app.verifier import JWTVerifier
 
 
 STORE_ALIASES = {"filesystem": FileSystemUserDataStore}
-MIDDLEWARE_ALIASES = {"user-identity": JWTMiddleware}
+MIDDLEWARE_ALIASES = {"user-identity": OAuthMiddleware}
 
 
 @dataclass
@@ -212,13 +206,13 @@ class App:
         profile_expand: If True, admin CLI generates individual flags
             from profile model fields. If False, accepts --profile
             as JSON or @file.
-        auth: How HTTP callers are authenticated. ``None`` (default)
-            selects from the environment: ``AUTH_ISSUER`` present means
-            ``OAuthResourceServer.from_env()`` (standard MCP OAuth against
-            an external authorization server; see ``mcp_app.auth``),
-            otherwise ``SharedSecretJWT()`` (the 1.x self-issued token
-            model under ``SIGNING_KEY``). Pass an instance to pin a mode
-            explicitly. stdio mode ignores it.
+        auth: How HTTP callers are authenticated: an
+            ``OAuthResourceServer`` naming the identity provider that
+            issues tokens (see ``mcp_app.auth``). ``None`` (default) reads
+            it from the environment, where ``AUTH_ISSUER`` is required to
+            serve HTTP. Pass an instance to configure it in code, which
+            tests do to hand the server a static key set. stdio mode has
+            no HTTP auth and ignores it.
         extra_routes: Optional list of Starlette routing objects
             (``Route`` / ``Mount``) the app contributes to the HTTP
             stack. They are mounted **before** the MCP catch-all at
@@ -246,7 +240,7 @@ class App:
     profile_expand: bool = True
     safe_tool: SafeTool | None = None
     extra_routes: list[BaseRoute] | None = None
-    auth: SharedSecretJWT | OAuthResourceServer | None = None
+    auth: OAuthResourceServer | None = None
 
     def __post_init__(self):
         self._asgi = None
@@ -295,11 +289,11 @@ class App:
             verify_storage(data_path, os.environ.get("REQUIRED_FS_TYPE"))
         return store
 
-    def _resolve_auth(self) -> SharedSecretJWT | OAuthResourceServer:
-        """The auth mode in force: explicit ``auth=``, else from the environment."""
+    def _resolve_auth(self) -> OAuthResourceServer:
+        """The auth configuration: explicit ``auth=``, else from the environment."""
         if self.auth is not None:
             return self.auth
-        return OAuthResourceServer.from_env() or SharedSecretJWT()
+        return OAuthResourceServer.from_env()
 
     def _build_asgi(self):
         """Assemble the Starlette ASGI stack: health, admin, MCP + middleware."""
@@ -309,22 +303,16 @@ class App:
         mcp_app._store = store
         mcp_app._transport = "http"
         auth_mode = self._resolve_auth()
+        auth_mode.log_startup()
 
         self._mcp = MCPServer(self.name)
         for func in _discover_tools(self._discovered_modules, "http"):
             self._mcp.tool()(_require_identity(func))
 
         auth_store = DataStoreAuthAdapter(store)
-        if isinstance(auth_mode, OAuthResourceServer):
-            verifier = OIDCTokenVerifier(auth_mode, auth_store)
-            identity_middleware = OAuthMiddleware
-            admin_auth = OAuthAdminAuth(verifier)
-        else:
-            verifier = JWTVerifier(auth_store)
-            identity_middleware = JWTMiddleware
-            admin_auth = None  # SharedSecretAdminAuth, built by create_admin_app
+        verifier = OIDCTokenVerifier(auth_mode, auth_store)
         admin_app = create_admin_app(
-            auth_store, safe_tool=self.safe_tool, admin_auth=admin_auth
+            auth_store, admin_auth=OAuthAdminAuth(verifier), safe_tool=self.safe_tool
         )
         # Transport parameters live on streamable_http_app() in SDK 2.x.
         # DNS-rebinding protection is off: the service sits behind a
@@ -340,17 +328,13 @@ class App:
         )
 
         if self.middleware is None:
-            wrapped = identity_middleware(inner, verifier)
+            wrapped = OAuthMiddleware(inner, verifier)
         elif self.middleware == []:
             wrapped = inner
         else:
             wrapped = inner
             for mw_value in reversed(self.middleware):
-                if mw_value == "user-identity":
-                    # The alias follows the auth mode in force.
-                    mw_cls = identity_middleware
-                else:
-                    mw_cls = _resolve_class(mw_value, MIDDLEWARE_ALIASES)
+                mw_cls = _resolve_class(mw_value, MIDDLEWARE_ALIASES)
                 wrapped = mw_cls(wrapped, verifier, store)
 
         @contextlib.asynccontextmanager
@@ -370,15 +354,14 @@ class App:
         # The "/" mount matches everything, so extra_routes must precede
         # it to take effect. extra_routes are mounted un-wrapped — each
         # owns its own auth (see the App.extra_routes docstring).
+        # The RFC 9728 metadata document is public: clients read it before
+        # they hold a token, so it sits outside the identity middleware next
+        # to /health.
         routes: list[BaseRoute] = [
             Route("/health", health),
+            auth_mode.protected_resource_route(),
             Mount("/admin", app=admin_app),
         ]
-        if isinstance(auth_mode, OAuthResourceServer):
-            # RFC 9728 metadata, public, built by the MCP SDK. Clients read
-            # it before they hold a token, so it sits outside the identity
-            # middleware next to /health.
-            routes.extend(auth_mode.protected_resource_routes())
         if self.extra_routes:
             routes.extend(self.extra_routes)
         routes.append(Mount("/", app=wrapped))
@@ -422,6 +405,13 @@ class App:
         mcp.run(transport="stdio")
 
     def serve(self, host: str = "0.0.0.0", port: int = 8080) -> None:
-        """Run MCP over HTTP via uvicorn."""
+        """Run MCP over HTTP via uvicorn.
+
+        Proxy headers are honored from any peer so the request scheme is
+        ``https`` behind a TLS-terminating front door (Cloud Run and the
+        like forward ``X-Forwarded-Proto``); the server's own URL, and so
+        the audience it expects, is derived from the request. Only the
+        scheme is taken from forwarded headers; ``Host`` is used as sent.
+        """
         import uvicorn
-        uvicorn.run(self, host=host, port=port)
+        uvicorn.run(self, host=host, port=port, proxy_headers=True, forwarded_allow_ips="*")

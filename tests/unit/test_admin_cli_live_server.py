@@ -19,12 +19,12 @@ from click.testing import CliRunner
 from pydantic import BaseModel
 
 from mcp_app.app import App, SafeTool
-from mcp_app.cli import create_admin_cli
+from mcp_app.cli import _save_setup, create_admin_cli
 from fixture_app import tools
 
 APP_NAME = "live-admin-app"
-SIGNING_KEY = "test-signing-key-" + "x" * 24  # 40 bytes, obviously fake
 USER = "alice@example.com"
+OPERATOR = "operator@example.com"
 
 
 class Profile(BaseModel):
@@ -39,12 +39,10 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def live_server(tmp_path, monkeypatch):
-    monkeypatch.setenv("SIGNING_KEY", SIGNING_KEY)
+def live_server(tmp_path, monkeypatch, issuer):
     monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
+    monkeypatch.setenv("ADMIN_EMAILS", OPERATOR)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    monkeypatch.delenv("MCP_APP_URL", raising=False)
-    monkeypatch.delenv("MCP_APP_SIGNING_KEY", raising=False)
     # App() registers its profile model in mcp_app.context's module globals;
     # restore them afterwards so later tests see the state they expect.
     import mcp_app.context as ctx
@@ -57,6 +55,7 @@ def live_server(tmp_path, monkeypatch):
         profile_model=Profile,
         profile_expand=True,
         safe_tool=SafeTool(name="ping", arguments={}, description="returns pong"),
+        auth=issuer.config,
     )
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
@@ -71,7 +70,13 @@ def live_server(tmp_path, monkeypatch):
     url = f"http://127.0.0.1:{port}"
     admin = create_admin_cli(APP_NAME)
     runner = CliRunner()
-    assert runner.invoke(admin, ["connect", url, "--signing-key", SIGNING_KEY]).exit_code == 0
+    assert runner.invoke(admin, ["connect", url]).exit_code == 0
+    # Stand in for the sign-in a later release adds: the operator's token
+    # saved beside the URL. The server derives its audience from Host.
+    _save_setup(
+        {"mode": "remote", "url": url, "access_token": issuer.token(OPERATOR, audience=url + "/")},
+        app_name=APP_NAME,
+    )
     added = runner.invoke(admin, ["users", "add", USER, "--token", "t1"])
     assert added.exit_code == 0, added.output
     yield admin, runner
@@ -85,7 +90,6 @@ def test_safe_tool_invoke_round_trips(live_server):
     assert result.exit_code == 0, result.output
     envelope = json.loads(result.output)
     assert envelope["result"]["status_code"] == 200
-    assert envelope["probed_as"] == USER
 
 
 def test_update_profile_reads_then_writes_in_one_cycle(live_server):

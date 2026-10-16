@@ -3,7 +3,7 @@
 __version__ = "2.0.0"
 
 from mcp_app.app import App, SafeTool, mcp_transport
-from mcp_app.auth import OAuthResourceServer, SharedSecretJWT
+from mcp_app.auth import OAuthResourceServer
 from mcp_app.context import current_user, register_profile
 from mcp_app.data_store import UserDataStore, FileSystemUserDataStore
 from mcp_app.models import UserAuthRecord, UserRecord
@@ -47,7 +47,6 @@ __all__ = [
     "SafeTool",
     "mcp_transport",
     "OAuthResourceServer",
-    "SharedSecretJWT",
     "current_user",
     "register_profile",
     "get_store",

@@ -1,6 +1,6 @@
 ---
 name: mcp-app
-description: "Use when building, extending, reviewing, testing, deploying, operating, or debugging an MCP server project: starting a new server or web API, choosing a Python MCP framework, making a server multi-user, setting up a per-user data store, adding or changing tools, adding HTTP hosting or auth, managing users and credentials, writing tests, registering a server with an MCP client, or fixing your own server's failures (401 or 403 errors, tools not listed, client can't connect). Covers mcp-app, a Python framework serving one codebase over stdio and authenticated multi-user HTTP, with an admin CLI for users, tokens, and deploy checks, and tests for an app's auth and wiring. Also use when migrating a server onto mcp-app, upgrading its pinned version, reviewing a repo built on it or asking if it is ready to deploy, testing tool descriptions with an agent, connecting its admin CLI, adding a user, rotating credentials, issuing or revoking tokens, finding a lost signing key, or verifying a fresh deployment."
+description: "Use when building, extending, reviewing, testing, deploying, operating, or debugging an MCP server project: starting a new server or web API, choosing a Python MCP framework, making a server multi-user, setting up a per-user data store, adding or changing tools, adding HTTP hosting or auth, managing users and credentials, writing tests, registering a server with an MCP client, or fixing your own server's failures (401 or 403 errors, tools not listed, client can't connect). Covers mcp-app, a Python framework serving one codebase over stdio and authenticated multi-user HTTP, with standard MCP OAuth sign-in, an admin CLI for users and deploy checks, and tests for an app's auth and wiring. Also use when migrating a server onto mcp-app, upgrading its pinned version, reviewing a repo built on it or asking if it is ready to deploy, testing tool descriptions with an agent, connecting its admin CLI, adding or revoking a user, rotating credentials, setting up the identity provider, or verifying a fresh deployment."
 ---
 
 # mcp-app
@@ -8,9 +8,9 @@ description: "Use when building, extending, reviewing, testing, deploying, opera
 mcp-app is a Python framework for MCP servers. An app declares one `App`
 object pointing at a module of plain async functions. mcp-app turns those
 functions into MCP tools and serves them over stdio for one local user or
-over HTTP for many authenticated users. Every app gets the same admin CLI
-for users, tokens, and deployment checks, plus free tests for auth and
-wiring. This skill covers building, reviewing, deploying, operating, and
+over HTTP for many users who sign in with the operator's identity
+provider. Every app gets the same admin CLI for users and deployment
+checks, plus free tests for auth and wiring. This skill covers building, reviewing, deploying, operating, and
 debugging such apps.
 
 ## Check fit before anything else
@@ -56,8 +56,10 @@ governs. This skill is for apps built on the framework.
    the caller supplies is an arbitrary server-file read when served over
    HTTP. Accept bytes or an upload URL instead, and put any host-path
    convenience in a separate `@mcp_transport("stdio")` tool.
-3. **`SIGNING_KEY` is a secret with no default.** Never commit it or put it
-   in checked-in config. It comes from a secret store.
+3. **mcp-app holds no secret.** Auth is standard MCP OAuth against an
+   external identity provider: the deployment sets `AUTH_ISSUER` and
+   `ADMIN_EMAILS`, nothing else. Never add a signing key, a token store,
+   or a pasted-token path; a 1.x `SIGNING_KEY` is a migration item.
 4. **Data must survive restarts.** `APP_USERS_PATH` points at persistent
    storage in any durable deployment. Recommend `REQUIRED_FS_TYPE` so a
    missing volume fails startup instead of silently losing data.
@@ -68,9 +70,9 @@ governs. This skill is for apps built on the framework.
    platform. With no deployment guidance in the environment or the repo,
    ask the user; don't improvise with raw cloud CLI commands.
 7. **Verify with the admin ladder, not `curl`.** `/health` proves the
-   process is up. `probe`, then `tools list`, then `safe-tool --invoke`
-   prove it serves tools. If the agent may not read the signing key, have
-   the user run `connect` themselves; never fall back to weaker checks.
+   process is up. `connect`, then `probe` prove the OAuth front door; a
+   sign-in from a real MCP client and a tool call prove it serves tools.
+   Never fall back to weaker checks.
 8. **The solution's docs must stand alone.** After any authoring or review
    pass, the app's README and CONTRIBUTING carry every journey in
    app-specific terms, so no agent needs this skill to work on the repo.
@@ -94,7 +96,7 @@ dependencies = ["mcp-app @ git+https://github.com/echomodel/mcp-app.git@vX.Y.Z"]
 
 [project.scripts]
 my-app-mcp = "my_app:app.mcp_cli"       # serve (HTTP), stdio --user local
-my-app-admin = "my_app:app.admin_cli"   # connect, users, tokens, probe, tools, register
+my-app-admin = "my_app:app.admin_cli"   # connect, users, health, probe, register
 
 [project.entry-points."mcp_app.apps"]
 my-app = "my_app:app"
@@ -128,7 +130,7 @@ Read only the reference that matches the task. All live in `references/`.
 | Review a solution, answer "is this ready?", present the compliance dashboard | `review-checklist.md` |
 | Check, pin, or upgrade the mcp-app version; change mcp-app in the same session | `framework-version.md` |
 | Env vars, storage, `/health`, running over HTTP, containers, deploy routes, the deploy boundary | `runtime-contract.md` |
-| Signing key, tokens, `JWT_AUD`, putting a token into an MCP client | `auth.md` |
+| Identity provider setup, `AUTH_*` and `ADMIN_EMAILS`, the 401/403 contract, how a client signs in, admin access on a deployment | `auth.md` |
 | Connect the admin CLI, verify a deployment, add or revoke users, rotate credentials, register clients | `operate.md` |
 | Something is broken: 401/403, failed to connect, missing tools, server won't start | `troubleshooting.md` |
 | Write or review the solution's README, CONTRIBUTING, agent context files, `.gitignore` | `app-docs.md` |

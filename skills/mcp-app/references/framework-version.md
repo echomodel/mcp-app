@@ -15,13 +15,19 @@ whether it pins a specific version or commit.
 | mcp-app | MCP Python SDK | Auth model |
 |---|---|---|
 | `v1.0.0` (last of the 1.x line) | `mcp>=1,<2` (`FastMCP`) | Shared `SIGNING_KEY`, self-issued user tokens |
-| `v2.x` | `mcp>=2,<3` (`MCPServer`) | Standard MCP OAuth (phased in; see the app's README) |
+| `v2.x` | `mcp>=2,<3` (`MCPServer`) | Standard MCP OAuth only: external issuer, `ADMIN_EMAILS`, no `SIGNING_KEY` |
 
 An app pinned to `v1.0.0` must not also pin `mcp>=2`; an app on `v2.x`
 must not pin `mcp<2`. mcp-app's own `pyproject.toml` carries the SDK
 bound for its line, so an app that only pins `mcp-app` gets the right
 SDK automatically. Moving an app from 1.x to 2.x is a deliberate
-upgrade, not a routine pin bump.
+upgrade, not a routine pin bump: the deployment gains `AUTH_ISSUER` and
+`ADMIN_EMAILS` and an identity provider set up per `auth.md`; it loses
+`SIGNING_KEY`, `JWT_AUD`, `TOKEN_DURATION_SECONDS`, `/admin/tokens`,
+the `tokens` CLI group and `connect --signing-key`; every user's
+pasted token stops working and each user re-adds the server URL in
+their client and signs in; tests built on minted admin JWTs move to
+the `oauth_env` fixture (`testing.md`).
 
 ## Pin discipline (mandatory)
 

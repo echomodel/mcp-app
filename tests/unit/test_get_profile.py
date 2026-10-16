@@ -14,26 +14,26 @@ from starlette.routing import Mount, Route
 
 from mcp_app.admin import create_admin_app
 from mcp_app.admin_client import RemoteAuthAdapter
+from mcp_app.auth import OAuthAdminAuth, OIDCTokenVerifier
 from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
 from mcp_app.models import UserAuthRecord
 
+from .conftest import OPERATOR
 
-SIGNING_KEY = "test-key-get-profile-32chars-pad!"
 BASE_URL = "http://test"
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
-    monkeypatch.setenv("SIGNING_KEY", SIGNING_KEY)
+def store(auth_env):
     return FileSystemUserDataStore(app_name="test")
 
 
 @pytest.fixture
-def app(store):
+def app(store, issuer):
     auth_store = DataStoreAuthAdapter(store)
-    admin_app = create_admin_app(auth_store)
+    verifier = OIDCTokenVerifier(issuer.config, auth_store)
+    admin_app = create_admin_app(auth_store, admin_auth=OAuthAdminAuth(verifier))
 
     async def health(request):
         return JSONResponse({"status": "ok"})
@@ -45,10 +45,10 @@ def app(store):
 
 
 @pytest.fixture
-def adapter(app):
+def adapter(app, issuer):
     transport = httpx.ASGITransport(app=app)
     http_client = httpx.AsyncClient(transport=transport, base_url=BASE_URL)
-    return RemoteAuthAdapter(BASE_URL, SIGNING_KEY, http_client=http_client)
+    return RemoteAuthAdapter(BASE_URL, issuer.token(OPERATOR), http_client=http_client)
 
 
 # --- get_full via REST ---

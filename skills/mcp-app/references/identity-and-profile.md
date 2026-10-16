@@ -7,8 +7,9 @@ profiles are in `operate.md`.
 
 ## How it works
 
-In HTTP mode, identity middleware validates the JWT, loads the full
-user record from the store (auth + profile in one read), and sets
+In HTTP mode, identity middleware validates the identity provider's
+access token (`auth.md`), loads the full user record for its email
+claim from the store (auth + profile in one read), and sets the
 `current_user` ContextVar. In stdio mode, the CLI loads the user
 record from the store using the `--user` flag.
 

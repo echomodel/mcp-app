@@ -75,10 +75,3 @@ def test_health_local_mode(local_env):
     result = _run(binary, ["health"], env)
     assert result.returncode == 0
     assert "local" in result.stdout.lower()
-
-
-def test_tokens_rejected_in_local_mode(local_env):
-    binary, env, _ = local_env
-    _run(binary, ["connect", "local"], env)
-    result = _run(binary, ["tokens", "create", "alice@example.com"], env)
-    assert "remote" in result.stdout.lower() or result.returncode == 0

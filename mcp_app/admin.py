@@ -1,16 +1,13 @@
 """REST admin endpoints for user management.
 
-Mounted at /admin on the solution's ASGI app. Gated by an ``AdminAuth``
-strategy chosen by the app's auth mode: in shared-secret mode an
-admin-scoped JWT under the same ``SIGNING_KEY`` as user tokens; in OAuth
-resource-server mode the identity provider's token for an email listed
-in ``ADMIN_EMAILS``.
+Mounted at /admin on the solution's ASGI app. Every endpoint is gated by
+an ``AdminAuth`` strategy, in practice :class:`mcp_app.auth.OAuthAdminAuth`:
+the identity provider's token for an email listed in ``ADMIN_EMAILS``.
+The deployment issues no tokens of its own; the authorization server does.
 """
 
-import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
-import jwt as pyjwt
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -20,122 +17,27 @@ from mcp_app.health_check import build_admin_health_detail
 from mcp_app.models import UserAuthRecord
 from mcp_app.store import UserAuthStore
 
-_FALLBACK_TOKEN_DURATION = 315360000  # ~10 years in seconds
-
-
-class InvalidTokenDurationError(ValueError):
-    """Raised when TOKEN_DURATION_SECONDS env var is not a valid integer."""
-    pass
-
-
-def get_default_token_duration() -> int:
-    """Resolve default token duration in seconds.
-
-    Priority: TOKEN_DURATION_SECONDS env var → _FALLBACK_TOKEN_DURATION.
-    Empty/unset env var silently falls back. Non-integer value raises.
-    """
-    raw = os.environ.get("TOKEN_DURATION_SECONDS")
-    if not raw:
-        return _FALLBACK_TOKEN_DURATION
-    try:
-        return int(raw)
-    except ValueError:
-        raise InvalidTokenDurationError(
-            f"TOKEN_DURATION_SECONDS must be an integer, got: {raw!r}"
-        )
-
-
 SAFE_TOOL_SCHEMA_VERSION = "1"
 
 
-class SharedSecretAdminAuth:
-    """Admin auth for the shared-secret mode: HS256 JWT with ``scope: "admin"``.
-
-    Reads ``SIGNING_KEY`` (required) and ``JWT_AUD`` from the environment.
-    Also issues user tokens, which is what makes ``POST /admin/tokens`` and
-    the token in the ``POST /admin/users`` response possible in this mode.
-    """
-
-    issues_tokens = True
-
-    def __init__(self):
-        self.signing_key = os.environ.get("SIGNING_KEY")
-        if not self.signing_key:
-            raise RuntimeError(
-                "SIGNING_KEY environment variable is required for admin endpoints."
-            )
-        self.audience = os.environ.get("JWT_AUD")
-
-    async def verify(self, request: Request) -> bool:
-        auth = request.headers.get("authorization", "")
-        if not auth.startswith("Bearer "):
-            return False
-        try:
-            claims = pyjwt.decode(
-                auth[7:], self.signing_key, algorithms=["HS256"],
-                audience=self.audience,
-            )
-            return claims.get("scope") == "admin"
-        except pyjwt.InvalidTokenError:
-            return False
-
-    def issue_token(self, email: str, duration_seconds: int | None = None) -> dict:
-        if duration_seconds is None:
-            duration_seconds = get_default_token_duration()
-        now = datetime.now(timezone.utc)
-        payload = {
-            "sub": email,
-            "iat": now,
-            "exp": now + timedelta(seconds=duration_seconds),
-        }
-        if self.audience:
-            payload["aud"] = self.audience
-        token = pyjwt.encode(payload, self.signing_key, algorithm="HS256")
-        return {
-            "email": email,
-            "token": token,
-            "duration_seconds": duration_seconds,
-        }
-
-
-def create_admin_app(store: UserAuthStore, safe_tool=None, admin_auth=None) -> Starlette:
+def create_admin_app(store: UserAuthStore, *, admin_auth, safe_tool=None) -> Starlette:
     """Create a Starlette app with admin REST endpoints.
 
     Args:
-        store: Auth store for user registration, verification, and
-            profile storage. POST /admin/users accepts an optional
-            'profile' field saved alongside the auth record.
+        store: Auth store for user registration and profile storage.
+            POST /admin/users accepts an optional 'profile' field saved
+            alongside the auth record.
+        admin_auth: Object with ``async verify(request) -> bool`` deciding
+            who may call these endpoints. The ``App`` passes
+            ``mcp_app.auth.OAuthAdminAuth``.
         safe_tool: Optional ``SafeTool`` declaration. When set, exposed
-            via ``GET /admin/safe-tool`` so the admin CLI can perform
-            an end-to-end smoke test using the declared tool. The
-            endpoint carries only metadata — the CLI does the actual
-            MCP handshake itself, avoiding duplication of MCP transport
-            logic on the server.
-        admin_auth: Strategy deciding who may call these endpoints and
-            whether the deployment issues user tokens. Default:
-            ``SharedSecretAdminAuth()``. In OAuth resource-server mode
-            the ``App`` passes ``mcp_app.auth.OAuthAdminAuth``, which
-            accepts the identity provider's token for ``ADMIN_EMAILS``
-            members and issues no tokens.
+            via ``GET /admin/safe-tool`` so an operator can perform an
+            end-to-end smoke test using the declared tool. The endpoint
+            carries only metadata; the caller does the MCP handshake.
     """
-
-    if admin_auth is None:
-        admin_auth = SharedSecretAdminAuth()
 
     async def _verify_admin(request: Request) -> bool:
         return await admin_auth.verify(request)
-
-    def _no_tokens() -> JSONResponse:
-        return JSONResponse(
-            {
-                "error": "tokens_not_issued_here",
-                "error_description": (
-                    "This deployment runs in OAuth resource-server mode; "
-                    "the authorization server issues user tokens"
-                ),
-            },
-            status_code=409,
-        )
 
     async def register_user(request: Request) -> JSONResponse:
         if not await _verify_admin(request):
@@ -145,8 +47,7 @@ def create_admin_app(store: UserAuthStore, safe_tool=None, admin_auth=None) -> S
         email = body.get("email")
         if not email:
             return JSONResponse({"error": "email required"}, status_code=400)
-
-        duration = body.get("duration_seconds", get_default_token_duration())
+        email = email.lower()
 
         existing = await store.get(email)
         if not existing:
@@ -158,10 +59,7 @@ def create_admin_app(store: UserAuthStore, safe_tool=None, admin_auth=None) -> S
                 ),
                 profile=profile,
             )
-
-        if not admin_auth.issues_tokens:
-            return JSONResponse({"email": email, "registered": True})
-        return JSONResponse(admin_auth.issue_token(email, duration))
+        return JSONResponse({"email": email, "registered": True})
 
     async def list_users(request: Request) -> JSONResponse:
         if not await _verify_admin(request):
@@ -211,25 +109,6 @@ def create_admin_app(store: UserAuthStore, safe_tool=None, admin_auth=None) -> S
 
         return JSONResponse({"email": email, "profile": record.profile})
 
-    async def create_token(request: Request) -> JSONResponse:
-        """Issue a new token for an existing, active user."""
-        if not await _verify_admin(request):
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-
-        body = await request.json()
-        email = body.get("email")
-        if not email:
-            return JSONResponse({"error": "email required"}, status_code=400)
-
-        user = await store.get(email)
-        if not user:
-            return JSONResponse({"error": "User not found"}, status_code=404)
-
-        if not admin_auth.issues_tokens:
-            return _no_tokens()
-        duration = body.get("duration_seconds", get_default_token_duration())
-        return JSONResponse(admin_auth.issue_token(email, duration))
-
     async def get_admin_health(request: Request) -> JSONResponse:
         """Full health diagnostic detail. Admin auth required.
 
@@ -277,7 +156,6 @@ def create_admin_app(store: UserAuthStore, safe_tool=None, admin_auth=None) -> S
         Route("/users/{email:path}/profile", update_profile, methods=["PATCH"]),
         Route("/users/{email:path}/profile", get_profile, methods=["GET"]),
         Route("/users/{email:path}", revoke_user, methods=["DELETE"]),
-        Route("/tokens", create_token, methods=["POST"]),
         Route("/safe-tool", get_safe_tool, methods=["GET"]),
         Route("/health", get_admin_health, methods=["GET"]),
     ])

@@ -1,308 +1,206 @@
-# Auth: signing key, tokens, and client credentials
+# Auth: the identity provider, administrators, and client sign-in
 
 Read this whenever a task touches how callers authenticate to an mcp-app
-server: setting or retrieving `SIGNING_KEY`, connecting the admin CLI to a
-deployment, issuing or revoking user tokens, putting a token into an MCP
-client, or deciding on `JWT_AUD` and token lifetime.
+server: configuring the issuer, naming administrators, deciding whether
+`AUTH_AUDIENCE` is needed, setting up the identity provider, explaining a
+401 or 403, or connecting an MCP client to a deployment.
 
-This file describes the framework's current auth model. All auth-specific
+This file describes the framework's auth model. All auth-specific
 material for this skill lives here so the model can change in one place.
-Other references point here instead of repeating it. Two places still
-touch it: `testing.md` Step 2 mints an admin JWT in a test, and
-`troubleshooting.md` names the signing chain as a failure layer.
+Other references point here instead of repeating it.
 
-## Two modes
+## The model in one paragraph
 
-mcp-app 2.x has two HTTP auth modes. A deployment runs one of them, chosen
-at startup; tool code is identical under both.
+mcp-app is an OAuth 2.1 *resource server* (standard MCP authorization).
+An external authorization server (the identity provider, typically
+fronting Sign in with Google) signs the user in and issues the access
+token. mcp-app validates the token against the issuer's published keys,
+maps its email claim to a user record, and publishes a discovery
+document so an MCP client finds the issuer from the server URL alone.
+mcp-app holds no signing secret, issues no tokens, and never sees a
+password. stdio mode has no auth at all: whoever can launch the process
+is the user named by `--user`.
 
-| Mode | Selected by | User tokens issued by | What the user does |
-|---|---|---|---|
-| **OAuth resource server** (standard MCP authorization) | `AUTH_ISSUER` set, or `App(auth=OAuthResourceServer(...))` | An external OAuth 2.1 authorization server (identity provider), normally fronting Sign in with Google | Enters the server URL in the client; signs in when the client sends them to the provider |
-| **Shared secret** (the 1.x model) | Neither of the above | mcp-app, signed with `SIGNING_KEY` | Pastes a token the operator minted |
+There is no other mode. The 1.x shared-secret model (`SIGNING_KEY`,
+operator-minted tokens, `tokens create`, `?token=`) does not exist in
+2.x. An app that still needs it pins `mcp-app@v1.0.0`
+(`framework-version.md`).
 
-The rest of this file describes the shared-secret model unless a section
-says otherwise. For OAuth mode see "OAuth resource-server mode" at the end.
+## Configuration
 
-## The shared-secret model in one paragraph
-
-HTTP mode authenticates every request with a JWT signed (HS256) by the
-deployment's `SIGNING_KEY`. User tokens carry the user's email as `sub`.
-Admin requests to `/admin` carry a short-lived JWT with `scope: "admin"`,
-which the admin CLI mints locally from the same key, so admin tokens never
-pass through the server first. The identity middleware validates the
-token, loads the user record, and rejects revoked users. stdio mode has no
-auth at all: whoever can launch the process is the user named by `--user`.
-
-## Auth environment variables
+Three variables configure a production HTTP deployment. The others are
+overrides for unusual setups. None is a secret.
 
 | Var | Required | If missing | Purpose |
 |-----|----------|------------|---------|
-| `AUTH_ISSUER` | For OAuth mode | Shared-secret mode | Issuer identifier, exactly as in the token's `iss` (trailing slash included if the issuer uses one). Setting it selects OAuth mode. |
-| `AUTH_AUDIENCE` | With `AUTH_ISSUER` | Startup fails | Value `aud` must contain: the API identifier registered at the issuer |
-| `MCP_RESOURCE_URL` | With `AUTH_ISSUER` | Startup fails | Public URL of this server, as users type it, trailing slash included |
+| `AUTH_ISSUER` | For HTTP | Startup fails | Issuer identifier, exactly as in the token's `iss` claim (trailing slash included if the issuer uses one) |
+| `ADMIN_EMAILS` | For HTTP | No administrators; startup warns | Comma-separated emails allowed on `/admin`; each is admitted as a user on first sign-in |
+| `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory (`runtime-contract.md`) |
+| `AUTH_AUDIENCE` | No | Derived from the request `Host` | Value `aud` must contain. Set only for a deployment reached by address rather than hostname, or answering on several hostnames |
 | `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email; namespaced issuers need the full name (e.g. `https://example.com/email`) |
 | `AUTH_JWKS_URI` | No | OpenID discovery | Issuer key set location, if discovery is unavailable |
-| `ADMIN_EMAILS` | For OAuth mode | No administrators | Comma-separated emails allowed on `/admin`; each is admitted as a user on first sign-in |
-| `SIGNING_KEY` | For HTTP, shared-secret mode | Startup fails | JWT signing key. No default. |
-| `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim (shared-secret mode) |
-| `TOKEN_DURATION_SECONDS` | No | 315360000 (~10yr) | Lifetime of newly issued tokens (shared-secret mode) |
 
-**`SIGNING_KEY`** is a secret. Never commit it to the repo or put it in a
-checked-in config file. Generate a strong random value:
+The same settings can be pinned in code with
+`App(auth=OAuthResourceServer(issuer=..., email_claim=...))`. The env vars
+exist so one build serves any deployment without a code change; do not
+add app-specific auth env vars on top of them.
 
-```bash
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-```
+**`AUTH_ISSUER`** must match the token's `iss` byte for byte. A missing or
+extra trailing slash is the usual mistake. The startup log line
+`mcp_app.startup auth issuer=... audience=... email_claim=... admin_emails=N`
+shows what the server is using.
 
-How it reaches the server's environment depends on the deployment. Work
-out the right approach with the user. Common patterns:
+**`ADMIN_EMAILS`** is the whole admin model. Membership in that variable
+is what makes an email an administrator: nothing is stored, there is no
+promotion path, and changing the set is a redeploy. Compared lower-cased.
+An administrator is admitted as a user on first sign-in (the record is
+created then), so a fresh deployment needs no `users add` for its
+operator. With it empty the server serves registered users but nobody
+can call `/admin` or bootstrap the first user; startup logs a warning.
 
-- **CI/CD secrets**: e.g. GitHub Actions secrets injected as env vars
-  during deployment.
-- **Cloud secret managers**: e.g. GCP Secret Manager or AWS Secrets
-  Manager, mapped to the env var by the deployment tool.
-- **Generated by the deployment tool**: some tools (e.g. Terraform's
-  `random_password`, or gapp's generated secrets) create and store it.
+**The server's own URL is not configured.** The audience a token must
+carry and the `resource` the discovery document advertises are both
+"this server's public URL", and mcp-app derives it from each request's
+`Host` header (scheme from the front door's `X-Forwarded-Proto`, which
+`serve` honors; host from `Host`, never `X-Forwarded-Host`). On any
+hostname-routed front door (Cloud Run, Kubernetes ingress, API gateway,
+reverse proxy) that is the same fact that delivered the request, so
+there is nothing to configure and nothing to drift against what the
+operator registered at the issuer and what users type.
 
-The goal: the secret is stored safely and injected as `SIGNING_KEY`
-wherever the server runs. After deploy, the operator needs it back to
-connect the admin CLI, so the chosen store must allow retrieval (see
-below).
+**`AUTH_AUDIENCE`** pins the audience when the derived URL is wrong: the
+service is reached by IP, or several hostnames route to it. The
+exposure of leaving it derived is small and bounded: an attacker would
+need a user's valid token for another mcp-app server behind the same
+issuer *and* a way to deliver it to this server under a hostname it
+answers to; token lifetime bounds the window. Mention the pin when a
+deployment is reached by address; don't push it otherwise.
 
-**`JWT_AUD`**: if unset, any valid JWT signed with the same key is
-accepted. Apps that share a signing key without distinct `JWT_AUD` values
-accept each other's user tokens. That may be intended (one auth domain
-across a suite of apps) or a leak. With a unique key per app it matters
-less. Raise it with the user and let them decide.
-
-**`TOKEN_DURATION_SECONDS`**: the ~10-year default makes tokens
-effectively permanent, because MCP clients can't refresh them. Set a
-shorter value if tokens should expire. It applies to newly issued tokens
-only.
-
-## Connect the admin CLI with the signing key
-
-```bash
-my-solution-admin connect https://your-service --signing-key "$(retrieval-cmd)"
-```
-
-`connect` saves the URL and key in `~/.config/{app-name}/setup.json`, so no
-other command takes `--url` or `--signing-key`. A later `connect <url>`
-without `--signing-key` reuses the saved key when the URL is unchanged.
-`connect local` (per-app CLI only) needs no key: it writes straight to the
-local filesystem store. The generic `mcp-app` CLI also reads
-`MCP_APP_SIGNING_KEY` from the environment.
-
-## Retrieve the signing key after deploy
-
-**Start with the deployment configuration.** Look at how the
-solution was deployed and how `SIGNING_KEY` was configured. If a
-deployment skill or plugin is loaded, check it for a secrets get or
-read command first (gapp's MCP tools, for example, offer
-`gapp_secret_get(env_var_name="SIGNING_KEY", plaintext=True)`).
-
-- **Bare `gcloud run deploy` with `--set-secrets=`**: stored directly in
-  Secret Manager; `gcloud secrets versions access latest --secret=...`.
-
-- **gapp** with a generated secret — retrieve from GCP Secret
-  Manager using the secret name from gapp config. Run from
-  inside the solution's repo directory (gapp resolves the
-  solution from the working directory):
-  ```bash
-  cd <solution-repo> && gapp secrets get <secret-name> --plaintext
-  ```
-
-- **Cloud secret manager** (GCP, AWS, etc.) — the key was
-  stored there by the deployment tool or manually:
-  ```bash
-  # GCP
-  gcloud secrets versions access latest --secret=SECRET_ID --project=PROJECT_ID
-  # AWS
-  aws secretsmanager get-secret-value --secret-id SECRET_ID
-  ```
-
-- **Terraform** managing the secret — check Terraform state:
-  ```bash
-  terraform output -raw signing_key
-  ```
-
-- **Docker Compose** — check `docker-compose.yml` for the
-  secret source (file path, env var, Docker secret).
-
-- **CI/CD secrets** (GitHub Actions, GitLab CI) — these are
-  write-only from the UI. If this is the only copy, generate
-  a new key, update the CI secret, and redeploy.
-
-- **Environment variable set manually** — check the process
-  environment or the shell/systemd/supervisor config.
-
-## If the signing key is lost
-
-Generate a new one, store it wherever the deployment expects
-it, redeploy, and re-register all users (existing tokens
-become invalid):
-
-```bash
-python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-```
-
-## When retrieval is denied to the agent
-
-An agent operating in a sandboxed environment may find that the
-plaintext signing-key fetch — whether via an MCP tool that
-returns the secret value, a `gcloud secrets versions access`
-call, or any other direct retrieval — is denied by the
-environment's permission policy. This is intentional: pulling a
-live production credential into an agent's transcript context
-needs explicit per-action authorization.
-
-**When this happens, do not downgrade verification.** A common
-failure mode is to skip `connect`, skip `probe`, skip `safe-tool
---invoke`, and substitute `curl /health` plus cloud-CLI
-inspection of the running revision. That is not equivalent — it
-verifies the process is alive but not that the deployment serves
-tools end-to-end, and it leaves the actual operator workflow
-(connect, probe, manage users, register clients) un-exercised.
-
-**Use the user-executed pattern instead.** Ask the user to run
-the connect command themselves so the secret never enters the
-agent's context. The exact mechanism depends on the agent
-platform — most platforms expose some way for the user to run a
-shell command in-session whose output stays out of the agent's
-transcript (for example, a `!`-prefix in some interactive
-agents). When that's available, ask the user to run something
-like:
-
-```
-my-solution-admin connect <url> --signing-key "$(<retrieval cmd>)"
-```
-
-…where `<retrieval cmd>` is the appropriate `gcloud secrets
-versions access ...`, `aws secretsmanager get-secret-value ...`,
-deployment-tool secret-get command, or `terraform output -raw
-...` for the operator's environment. After the user runs that,
-the per-app `connect` config persists the URL and key for this
-session and future ones; the agent can then proceed with `probe`
-and the rest of the verification ladder (`operate.md`) without
-ever having seen the key.
-
-If the agent's platform offers no in-session shell execution,
-ask the user to run the equivalent command in their own terminal
-and confirm when `connect` has succeeded. Then continue.
-
-The point: a permission denial is a routing signal, not a signal
-to substitute a weaker verification path.
-
-## Token lifecycle
-
-- `users add` returns the new user's token. `tokens create <email>`
-  issues another for an existing user.
-- Tokens are long-lived by default because MCP clients can't refresh
-  them.
-- Revocation is the access control. `users revoke` sets a cutoff
-  timestamp; every token issued before it is rejected.
-- After a revoke, `tokens create` reactivates the user with a fresh
-  token.
-- Losing or rotating the signing key invalidates every token. Users then
-  need new tokens and new client registrations.
-
-## Putting a token into an MCP client
-
-`register --user <email>` mints a token and prints ready-to-paste commands
-(`operate.md`). The forms it produces, for manual use:
-
-```bash
-# Claude Code: bearer header
-claude mcp add --transport http my-solution https://your-service/ \
-  --header "Authorization: Bearer USER_TOKEN"
-
-# Antigravity CLI (agy): flags go before the name
-agy mcp add --header "Authorization: Bearer USER_TOKEN" my-solution https://your-service/
-```
-
-```
-# Claude.ai and Claude mobile: token in the URL query string
-https://your-service/?token=USER_TOKEN
-```
-
-In a JSON client config, prefer `"Authorization": "Bearer ${MY_APP_TOKEN}"`
-with the token in an environment variable over pasting it into the file.
-Claude Code and agy both expand `${VAR}`.
-
-stdio registrations carry no token.
-
-## Apps that reuse the signing key
-
-An app serving its own `extra_routes` (large downloads, say) may sign
-short-lived URLs with `SIGNING_KEY` and verify them in the route handler,
-since those routes get no JWT middleware. `authoring.md` covers the
-pattern. Any change to the key or the auth model affects those URLs too.
-
-## OAuth resource-server mode
-
-In this mode mcp-app holds no signing secret and never sees a password. An
-external OAuth 2.1 authorization server (the identity provider) signs in the
-user and issues the access token; mcp-app validates it and maps it to a user
-record.
-
-**Per request** the identity middleware: takes the bearer token from the
-`Authorization` header only (`?token=` is refused; the MCP spec forbids it);
-verifies the signature against the issuer's JWKS (fetched from OpenID
-discovery or `AUTH_JWKS_URI`, cached, refetched once on an unknown `kid`);
-checks `iss` == `AUTH_ISSUER`, `aud` contains `AUTH_AUDIENCE`, `exp`; reads
-`AUTH_EMAIL_CLAIM`; loads the user record for that email (lower-cased) and
-sets `current_user`.
-
-**What a client sees:**
+## What a client sees
 
 | Situation | Response | Meaning |
 |---|---|---|
-| No token, or invalid (bad signature, wrong `iss`/`aud`, expired, no email claim) | `401` + `WWW-Authenticate: Bearer error="invalid_token", ..., resource_metadata="<MCP_RESOURCE_URL>/.well-known/oauth-protected-resource"` | Authenticate. A standard client follows the pointer, learns the issuer, runs the flow |
+| No token, or invalid (bad signature, wrong `iss`/`aud`, expired, no email claim) | `401` + `WWW-Authenticate: Bearer error="invalid_token", ..., resource_metadata="<base>/.well-known/oauth-protected-resource"` | Authenticate. A standard client follows the pointer, learns the issuer, runs the flow |
 | Valid token, email not registered | `403`, no challenge | Identity established; not admitted. Register the user; re-authenticating cannot help |
 | Valid token, registered email | Normal MCP response | `current_user` set |
-| Valid token, email in `ADMIN_EMAILS`, not registered | Normal MCP response; record created | Operator bootstrap; no `users add` needed |
-| `GET /.well-known/oauth-protected-resource` | `200` `{"resource", "authorization_servers": [issuer], "bearer_methods_supported": ["header"]}` | Public discovery document, built by the MCP SDK |
+| Valid token, email in `ADMIN_EMAILS`, not registered | Normal MCP response; record created | Operator bootstrap |
+| `GET /.well-known/oauth-protected-resource` | `200` `{"resource": "<base>/", "authorization_servers": [issuer], "bearer_methods_supported": ["header"]}` | Public discovery document; `resource` is the URL the request arrived at |
+| `?token=...` on any request | Ignored; `401` as above | Only the `Authorization` header is read |
 
-**The user journey:** the user enters `MCP_RESOURCE_URL` in their MCP
-client and nothing else. The client's first request gets the 401, reads the
-metadata document, reads the issuer's own metadata, registers itself
+Per request the identity middleware: takes the bearer token from the
+`Authorization` header; verifies the signature against the issuer's JWKS
+(fetched from OpenID discovery or `AUTH_JWKS_URI`, cached, refetched once
+on an unknown `kid`, asymmetric algorithms only); checks `iss` ==
+`AUTH_ISSUER`, `aud` contains the request's base URL (or
+`AUTH_AUDIENCE`), and `exp`; reads `AUTH_EMAIL_CLAIM`; loads the user
+record for that email (lower-cased) and sets `current_user`.
+
+**The user journey:** the user enters the server URL in their MCP client
+and nothing else. The client's first request gets the 401, reads the
+discovery document, reads the issuer's own metadata, registers itself
 (dynamic client registration, or a client ID metadata document if the
 issuer supports it), sends the user to sign in (Google, via the issuer),
-and comes back with a token. mcp-app sees only the token.
+and comes back with a token. mcp-app sees only the token. The client
+refreshes it itself; no token is ever pasted anywhere.
 
-**What the operator sets up at the issuer** (generic; provider UIs differ):
+## Who can sign in
 
-1. An API (resource) whose identifier is `MCP_RESOURCE_URL`; it becomes
-   `AUTH_AUDIENCE`. Refresh tokens ("offline access") on.
-2. Sign in with Google as the only login method; password login off.
-3. Dynamic client registration enabled, or client ID metadata documents
-   supported, so MCP clients can register with the server URL alone.
-   Confirm with `curl <issuer>/.well-known/oauth-authorization-server`:
-   it must list `registration_endpoint` (or advertise CIMD) and `S256` in
+- **Administrators** (`ADMIN_EMAILS`): admitted on first sign-in, may call
+  `/admin`.
+- **Registered users**: anyone an administrator registered via
+  `POST /admin/users`, with an optional profile.
+- **Everyone else**: the issuer signs them in; mcp-app answers `403`.
+
+Revoking a user (`DELETE /admin/users/{email}`, `users revoke`) deletes
+the record; the next request with their token is a `403`. Re-registering
+admits them again. There is nothing else to revoke on this side: the
+issuer owns the tokens.
+
+## Admin access on a deployment
+
+`/admin` accepts the identity provider's access token for an email in
+`ADMIN_EMAILS` — the same kind of token an MCP client obtains. The admin
+CLI drives `/admin` only against the local store (`connect local`); its
+remote mode supports `health`, `probe` and `register` and does not yet
+sign in, so remote `users`, `tools` and `safe-tool` exit with a message
+saying so. A device-code `login` is planned; the token slot
+(`access_token` in `setup.json`) already exists and nothing writes it.
+
+Until then, on a deployment:
+
+- The common case needs no admin call: the operator is in
+  `ADMIN_EMAILS` and is admitted on first sign-in from their MCP client.
+- To register another user, call `POST /admin/users` with an
+  administrator's access token obtained from the identity provider
+  (most providers can issue a test token for a registered API from
+  their dashboard):
+  ```bash
+  curl -X POST https://your-service/admin/users \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"email": "alice@example.com", "profile": {"<field>": "<value>"}}'
+  ```
+- The MCP admin tools server (`mcp-app admin-tools`) takes the same
+  `access_token` argument for its user-management tools.
+
+Say this plainly when an operator asks to add a user to a deployment; do
+not invent a `tokens` command or a signing key.
+
+## Setting up the identity provider
+
+Generic steps; provider UIs differ. Confirm each with the operator.
+
+1. **An API (resource)** whose identifier is the server's public URL,
+   exactly as users type it, trailing slash included. This is what tokens
+   carry as `aud` and what mcp-app derives from `Host`. Refresh tokens
+   ("offline access") on.
+2. **Sign in with Google** as the login method; password login off.
+3. **Dynamic client registration** enabled, or client ID metadata
+   documents supported, so MCP clients register with the server URL alone.
+   Confirm: `curl <issuer>/.well-known/oauth-authorization-server` must
+   list `registration_endpoint` (or advertise CIMD) and `S256` in
    `code_challenge_methods_supported`.
-4. The user's email added to access tokens. If the issuer namespaces custom
+4. **The user's email in access tokens.** If the issuer namespaces custom
    claims, set `AUTH_EMAIL_CLAIM` to the full claim name.
-5. If the issuer needs a default audience to issue JWT (not opaque) access
-   tokens when the client sends `resource` rather than `audience`, set it
-   to the API identifier.
+5. **A default audience**, if the issuer needs one to issue JWT (not
+   opaque) access tokens when a client sends `resource` rather than
+   `audience`: set it to the API identifier.
 
-**Admin surface in this mode.** Admin is membership in `ADMIN_EMAILS`:
-`/admin` accepts the identity provider's token when its email claim is in
-that set. Nothing is stored, there is no promotion path, and changing the
-set is a redeploy. No `SIGNING_KEY` is needed anywhere. `POST /admin/users`
-returns `{"email", "registered": true}` (no token); `POST /admin/tokens`
-returns `409`, because the authorization server issues tokens. An email in
-`ADMIN_EMAILS` is also admitted as a user on its first sign-in, so a fresh
-deployment needs no `users add` for the operator.
+Then deploy with `AUTH_ISSUER` and `ADMIN_EMAILS`, run
+`my-solution-admin probe` (`operate.md`), and sign in from an MCP client.
 
-The admin CLI does not yet sign in to an OAuth-mode deployment (`connect
-<url>` still expects a signing key), so for now `/admin` on such a
-deployment is driven with a bearer token from the identity provider, or
-users are added through the same mechanism a later release wraps in
-framework admin tools.
+## Putting a server into an MCP client
 
-**Testing without an issuer.** `OAuthResourceServer(..., jwks={"keys": [...]})`
-takes a static key set, so a test can sign tokens with a generated RSA key
-and run the whole stack in-process. mcp-app's own `tests/unit/test_oauth.py`
-is the worked example.
+`register` prints these for the connected deployment (`operate.md`). No
+credential appears in any of them:
+
+```bash
+# Claude Code
+claude mcp add --transport http -s user my-solution https://your-service/
+
+# Antigravity CLI (agy): one user-level config, no scopes
+agy mcp add my-solution https://your-service/
+```
+
+```
+# Claude.ai and Claude mobile: Settings > Connectors > Add custom connector
+https://your-service/
+```
+
+Each client signs the user in with the identity provider on first use.
+stdio registrations carry nothing either; identity is `--user`.
+
+## Apps with their own `extra_routes`
+
+Routes an app adds via `extra_routes` get no identity middleware; the URL
+itself must be the credential (a short-lived signed URL verified in the
+handler, `authoring.md`). The app signs those URLs with a secret it owns;
+mcp-app has none to lend it.
+
+## Testing without an issuer
+
+`OAuthResourceServer(..., jwks={"keys": [...]})` takes a static key set, so
+tests sign tokens with a generated RSA key and run the whole stack
+in-process. `mcp_app.testing.issuer.TestIssuer` does exactly that and the
+`oauth_env` fixture wires it to the `App`; `testing.md` Step 2 is the
+worked example.

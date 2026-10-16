@@ -41,14 +41,16 @@ def test_users_add_without_connect_fails(app, admin_env):
     assert result.returncode != 0
 
 
-def test_connect_url_without_signing_key_succeeds_but_users_fails(app, admin_env):
-    """connect <url> without --signing-key saves config but users add fails."""
+def test_connect_url_saves_but_remote_users_needs_sign_in(app, admin_env):
+    """connect <url> saves the connection; user management against it fails
+    clearly because this CLI holds no administrator token."""
     binary, env = admin_env
     connect = _run(binary, ["connect", "https://fake.example.com"], env)
     assert connect.returncode == 0
 
     add = _run(binary, ["users", "add", "alice@example.com"] + profile_flags(app), env)
     assert add.returncode != 0
+    assert "Traceback" not in add.stderr
 
 
 def test_health_without_connect_fails(admin_env):

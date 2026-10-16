@@ -3,7 +3,7 @@
 Read this when running a solution locally over HTTP, containerizing it,
 deploying it, choosing where its data lives, reading `/health`, or deciding
 how to get from a validated working tree to a deployed URL. Auth variables
-(`AUTH_*`, `SIGNING_KEY`, `JWT_AUD`, `TOKEN_DURATION_SECONDS`) are in `auth.md`.
+(`AUTH_*`, `ADMIN_EMAILS`) are explained in `auth.md`.
 
 mcp-app describes what an app needs from its environment and leaves the
 deployment to the operator's tooling. This file is that contract.
@@ -12,17 +12,15 @@ deployment to the operator's tooling. This file is that contract.
 
 | Var | Required | If missing | Purpose |
 |-----|----------|------------|---------|
-| `AUTH_ISSUER` | For OAuth mode | Shared-secret mode | Authorization server issuer; setting it selects OAuth resource-server mode (`auth.md`) |
-| `AUTH_AUDIENCE` | With `AUTH_ISSUER` | Startup fails | Required `aud` value, the API identifier at the issuer (`auth.md`) |
-| `MCP_RESOURCE_URL` | With `AUTH_ISSUER` | Startup fails | Public URL of this server as users type it (`auth.md`) |
+| `AUTH_ISSUER` | For HTTP | Startup fails | Authorization server issuer, exactly as in the token's `iss` (`auth.md`) |
+| `ADMIN_EMAILS` | For HTTP | No administrators; startup warns | Emails allowed on `/admin`, admitted as users on first sign-in (`auth.md`) |
+| `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
+| `AUTH_AUDIENCE` | No | Derived from the request `Host` | Pin the token audience for a deployment reached by address or on several hostnames (`auth.md`) |
 | `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (`auth.md`) |
 | `AUTH_JWKS_URI` | No | OpenID discovery | Issuer key set location (`auth.md`) |
-| `ADMIN_EMAILS` | For OAuth mode | No administrators | Emails allowed on `/admin`, admitted as users on first sign-in (`auth.md`) |
-| `SIGNING_KEY` | For HTTP, shared-secret mode | Startup fails | JWT signing key (`auth.md`) |
-| `JWT_AUD` | No | Audience not validated | Expected JWT `aud` claim, shared-secret mode (`auth.md`) |
-| `TOKEN_DURATION_SECONDS` | No | ~10 years | Token lifetime (`auth.md`) |
-| `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
 | `REQUIRED_FS_TYPE` | No | No assertion | Opt-in startup check that the data dir is on a given filesystem type |
+
+None of these is a secret. mcp-app holds no signing key.
 
 **`APP_USERS_PATH`** is critical for any deployment where the
 filesystem is not persistent. The default (`~/.local/share/{name}/users/`)
@@ -76,31 +74,36 @@ opt-in because ephemeral storage is correct on a laptop.
 
 `checks.persistent_storage` is `verified`, `unverified`, or `unavailable`.
 The public body never carries paths, filesystem types, or free space;
-`GET /admin/health` (admin JWT) returns that detail. Treat
+`GET /admin/health` (an administrator's token) returns that detail. Treat
 `status in ("healthy", "degraded")` as "serving". Older versions returned
 `{"status": "ok"}`; don't match that literal.
 
 ## Running locally
 
-**stdio** — no auth, no signing key. The MCP client launches the
+**stdio** — no auth, no identity provider. The MCP client launches the
 process:
 ```bash
 my-solution-mcp stdio --user local
 ```
 
-**HTTP**: requires `SIGNING_KEY` at minimum (`auth.md`):
+**HTTP**: requires `AUTH_ISSUER` and, to be administrable,
+`ADMIN_EMAILS` (`auth.md`):
 ```bash
-SIGNING_KEY=your-key my-solution-mcp serve
+AUTH_ISSUER=https://login.example.com/ \
+ADMIN_EMAILS=you@example.com \
+  my-solution-mcp serve
 ```
 
-With all options:
+With persistent storage:
 ```bash
-SIGNING_KEY=your-key \
+AUTH_ISSUER=https://login.example.com/ \
+ADMIN_EMAILS=you@example.com \
 APP_USERS_PATH=/data/my-solution/users \
-JWT_AUD=my-solution \
-TOKEN_DURATION_SECONDS=2592000 \
   my-solution-mcp serve --host 0.0.0.0 --port 8080
 ```
+
+`serve` honors `X-Forwarded-Proto` from the front door, so behind TLS
+termination the server knows its public URL is `https`.
 
 ## Runtime contract
 
@@ -110,24 +113,30 @@ Any deployment target must provide:
   `--port`, default `0.0.0.0:8080`). The `App` object is also a plain ASGI
   callable, so `uvicorn my_solution:app` or any ASGI host runs the same
   stack, but `serve` is the documented form for deployment configs.
-- **Environment variables:** `SIGNING_KEY` from a secret store, and
-  `APP_USERS_PATH` on persistent storage for any durable deployment.
+- **Environment variables:** `AUTH_ISSUER` and `ADMIN_EMAILS` (plain
+  values, not secrets), and `APP_USERS_PATH` on persistent storage for
+  any durable deployment.
 - **MCP endpoint path:** `/` (root), not `/mcp`. Clients connect to
   `https://host:port/`. If a previous deployment served another path,
   client URLs must change.
+- **Discovery:** `GET /.well-known/oauth-protected-resource`, no auth;
+  MCP clients read it to find the issuer.
 - **Health check:** `GET /health`, no auth (above).
 - **Admin API:** `POST/GET /admin/users`, `DELETE /admin/users/{email}`,
-  `GET/PATCH /admin/users/{email}/profile`, `POST /admin/tokens`,
-  `GET /admin/safe-tool`, `GET /admin/health`. All require an admin JWT.
-- **Auth model:** the app does its own auth. A platform auth gate (IAM, API
-  gateway) must let unauthenticated traffic through to the app.
+  `GET/PATCH /admin/users/{email}/profile`, `GET /admin/safe-tool`,
+  `GET /admin/health`. All require an administrator's token (`auth.md`).
+- **Auth model:** the app validates the identity provider's tokens itself.
+  A platform auth gate (IAM, API gateway) must let unauthenticated traffic
+  through to the app and forward the `Host` header unchanged: the public
+  URL and token audience derive from it.
 - **Build root:** the repo root where `pyproject.toml` lives.
 
 **Docker example:**
 ```bash
 docker build -t my-solution .
 docker run -p 8080:8080 \
-  -e SIGNING_KEY=your-key \
+  -e AUTH_ISSUER=https://login.example.com/ \
+  -e ADMIN_EMAILS=you@example.com \
   -v /persistent/path:/data \
   -e APP_USERS_PATH=/data/users \
   my-solution
@@ -161,8 +170,8 @@ mcp-app does not prescribe a deployment tool. Common options:
 
 - **Bare metal / VPS** — `pip install -e . && my-solution-mcp serve`
   with env vars set in the shell or a process manager
-- **Docker** — build the image, run it with `-e SIGNING_KEY=...`
-  and a volume mount for `APP_USERS_PATH`
+- **Docker** — build the image, run it with `-e AUTH_ISSUER=...
+  -e ADMIN_EMAILS=...` and a volume mount for `APP_USERS_PATH`
 - **Cloud Run / similar** — deploy from source or from a container
   image, set env vars and secrets through the platform
 - **A deployment tool with its own skill or plugin** (gapp is one
@@ -177,12 +186,14 @@ your context — map them to the deployment tool's configuration.
 After deployment completes, continue with "After deploy" below.
 
 Regardless of route, the agent must ensure:
-1. `SIGNING_KEY` is sourced from a secrets store or generated by
-   the deployment tool — never hardcoded or checked in
+1. `AUTH_ISSUER` and `ADMIN_EMAILS` are set, and the service's public
+   URL is registered as the API identifier at the identity provider
+   (`auth.md`)
 2. `APP_USERS_PATH` points to persistent storage — not the
    container's ephemeral filesystem
 3. The platform allows unauthenticated HTTP traffic through to
-   the app (mcp-app handles auth internally)
+   the app and forwards `Host` unchanged (mcp-app handles auth
+   internally and derives its public URL from the request)
 
 ## The deploy boundary
 
@@ -229,6 +240,5 @@ process is up, not that it serves tools to a real user.
 ## After deploy
 
 Connecting the admin CLI, verifying end-to-end, adding users, rotating
-credentials, and registering clients are in `operate.md`. The signing key
-for `connect` comes back out of whatever store the deployment used
-(`auth.md`).
+credentials, and registering clients are in `operate.md`. `connect`
+needs the URL only.

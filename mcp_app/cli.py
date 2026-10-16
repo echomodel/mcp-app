@@ -30,70 +30,50 @@ def _save_setup(data: dict, app_name: str | None = None):
 
 
 def _resolve_url(url: str | None, app_name: str | None = None) -> str:
-    result = url or os.environ.get("MCP_APP_URL") or _load_setup(app_name).get("url")
+    result = url or _load_setup(app_name).get("url")
     if not result:
-        raise click.ClickException(
-            "No base URL. Use --url, set MCP_APP_URL, or run: mcp-app setup <url>"
-        )
+        raise click.ClickException("No base URL. Run: connect <url>")
     return result
 
 
-def _resolve_signing_key(key: str | None, app_name: str | None = None) -> str:
-    result = key or os.environ.get("MCP_APP_SIGNING_KEY") or _load_setup(app_name).get("signing_key")
-    if not result:
-        raise click.ClickException(
-            "No signing key. Use --signing-key, set MCP_APP_SIGNING_KEY, or include in setup."
-        )
-    return result
+def _client(url: str | None = None, app_name: str | None = None):
+    """Remote adapter for the saved connection.
 
-
-def _client(url: str | None = None, signing_key: str | None = None, app_name: str | None = None):
+    Carries an access token only if one is saved in the connection config;
+    nothing in this version writes one, so admin operations against a
+    deployment fail with a clear message (see ``NotSignedInError``).
+    """
     from mcp_app.admin_client import RemoteAuthAdapter
     return RemoteAuthAdapter(
         _resolve_url(url, app_name),
-        _resolve_signing_key(signing_key, app_name),
+        _load_setup(app_name).get("access_token"),
     )
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    """Run a coroutine; translate a missing sign-in to a clean CLI error.
 
-
-def _run_probe(coro):
-    """Run a coroutine that may need a probe user; translate failures to a clean CLI error.
-
-    Adapter calls that mint a per-user probe token (``list_tools``,
-    ``call_tool``) raise ``NoProbeUserError`` when the deployment has
-    no registered users. The CLI translates that into a
-    ``click.ClickException`` so the operator sees an actionable
-    one-line message — never a stack trace — pointing at
-    ``users add <email>``.
-
-    NOTE on user selection: today the adapter's underlying
-    ``_pick_probe_user`` falls back to "any registered user" when no
-    explicit ``--user`` is provided. That auto-pick can mint a probe
-    token under a real user's identity, so an operator running these
-    commands ends up acting as that user against the upstream. A
-    follow-up issue tracks replacing the auto-pick with an explicit,
-    operator-configured probe identity. Until that lands, callers
-    should be deliberate about ``--user`` for any tool invocation
-    that would touch user data.
+    Adapter calls that need the operator's access token raise
+    ``NotSignedInError`` when none is held. The CLI shows its one-line
+    message, never a stack trace.
     """
-    from mcp_app.admin_client import NoProbeUserError
+    from mcp_app.admin_client import NotSignedInError
     try:
-        return _run(coro)
-    except NoProbeUserError as exc:
+        return asyncio.run(coro)
+    except NotSignedInError as exc:
         raise click.ClickException(str(exc))
 
 
-def _connect_handler(target: str, signing_key: str | None, app_name: str | None):
+_run_probe = _run
+
+
+def _connect_handler(target: str, app_name: str | None):
     """Shared connect logic for both generic and per-app CLIs.
 
     ``setup.json`` holds the active ``mode`` plus the saved remote
-    (``url``, ``signing_key``). Switching modes never discards the saved
-    remote: ``connect local`` changes only the mode, ``connect remote``
-    switches back to the saved remote, and ``connect <url>`` without
-    ``--signing-key`` reuses the saved key when the URL is unchanged.
+    (``url``). Switching modes never discards the saved remote:
+    ``connect local`` changes only the mode and ``connect remote``
+    switches back to it.
 
     When app_name is None (generic CLI), 'local' is not supported
     because the generic CLI doesn't know which app's filesystem store
@@ -116,7 +96,7 @@ def _connect_handler(target: str, signing_key: str | None, app_name: str | None)
     if target == "remote":
         if not saved.get("url"):
             raise click.ClickException(
-                "No saved remote. Run 'connect <url> --signing-key <key>' first."
+                "No saved remote. Run 'connect <url>' first."
             )
         _save_setup({**saved, "mode": "remote"}, app_name=app_name)
         click.echo(f"Configured {label}: {saved['url']}")
@@ -124,11 +104,8 @@ def _connect_handler(target: str, signing_key: str | None, app_name: str | None)
         return
     url = target.rstrip("/")
     data = {"mode": "remote", "url": url}
-    if signing_key:
-        data["signing_key"] = signing_key
-    elif saved.get("signing_key") and (saved.get("url") or "").rstrip("/") == url:
-        data["signing_key"] = saved["signing_key"]
-        click.echo("Reusing the saved signing key for this URL.")
+    if saved.get("access_token") and (saved.get("url") or "").rstrip("/") == url:
+        data["access_token"] = saved["access_token"]
     _save_setup(data, app_name=app_name)
     click.echo(f"Configured {label}: {url}")
     _print_endpoints(url)
@@ -144,9 +121,10 @@ def _print_endpoints(base_url: str):
     """
     base = base_url.rstrip("/")
     click.echo("  Endpoints:")
-    click.echo(f"    MCP     {base}/           JSON-RPC, JWT")
-    click.echo(f"    Admin   {base}/admin/*    admin REST, admin-JWT")
-    click.echo(f"    Health  {base}/health     unauthenticated")
+    click.echo(f"    MCP        {base}/           JSON-RPC, bearer token from the identity provider")
+    click.echo(f"    Admin      {base}/admin/*    admin REST, an administrator's token")
+    click.echo(f"    Discovery  {base}/.well-known/oauth-protected-resource  public")
+    click.echo(f"    Health     {base}/health     public")
 
 
 def _print_request(invocation: dict):
@@ -306,21 +284,15 @@ def _print_probe(result: dict):
     health = result.get("health", {})
     click.echo(f"Health: {health.get('status', 'unknown')}")
 
-    mcp = result.get("mcp")
-    if mcp is None:
-        click.echo("MCP: not probed")
-    elif mcp.get("status") == "ok":
-        click.echo(f"MCP: ok (probed as {mcp.get('probed_as')})")
-    elif mcp.get("status") == "skipped":
-        click.echo(f"MCP: skipped — {mcp.get('reason')}")
+    oauth = result.get("oauth")
+    if oauth is None:
+        click.echo("OAuth: not probed")
+    elif oauth.get("status") == "ok":
+        click.echo(f"OAuth: ok — issuer {oauth.get('issuer')}, resource {oauth.get('resource')}")
+        click.echo("  Unauthenticated requests get the 401 challenge; an MCP client can")
+        click.echo("  discover the issuer and sign the user in. Add the URL in a client to go further.")
     else:
-        click.echo(f"MCP: {mcp.get('status')} — {mcp.get('error', '')}")
-
-    tools = result.get("tools")
-    if tools is not None:
-        click.echo(f"Tools ({len(tools)}):")
-        for t in tools:
-            click.echo(f"  {t}")
+        click.echo(f"OAuth: {oauth.get('status')} — {oauth.get('error', '')}")
 
 
 # --- Profile helpers ---
@@ -380,26 +352,23 @@ def main():
 
 @main.command()
 @click.argument("target")
-@click.option("--signing-key", default=None, help="Signing key for admin auth.")
-def connect(target, signing_key):
+def connect(target):
     """Configure connection to a deployed instance.
 
-    A URL without --signing-key reuses the saved key when the URL is
-    unchanged; 'remote' re-selects the saved connection.
+    'remote' re-selects the saved connection.
 
     \b
     Examples:
-      mcp-app connect https://my-app.run.app --signing-key xxx
+      mcp-app connect https://my-app.run.app
     """
-    _connect_handler(target, signing_key, app_name=None)
+    _connect_handler(target, app_name=None)
 
 
 @main.command()
 def health():
     """Check health of a deployed instance."""
     from mcp_app.admin_client import RemoteAuthAdapter
-    resolved_url = _resolve_url()
-    client = RemoteAuthAdapter(resolved_url, "unused")
+    client = RemoteAuthAdapter(_resolve_url())
     result = _run(client.health_check())
     click.echo(f"{result['status']} ({result['status_code']})")
 
@@ -427,7 +396,7 @@ def users_list():
 @click.option("--profile", "profile_str", default=None,
               help="Profile data as JSON string or @file.")
 def users_add(email, profile_str):
-    """Register a user and get their token."""
+    """Register a user. They sign in with the identity provider from their MCP client."""
     from datetime import datetime, timezone
     from mcp_app.models import UserAuthRecord
 
@@ -436,13 +405,11 @@ def users_add(email, profile_str):
         profile = _parse_profile_value(profile_str)
         profile = _validate_profile(profile)
 
-    result = _run(_client().save(
+    result = _run_probe(_client().save(
         UserAuthRecord(email=email, created=datetime.now(timezone.utc)),
         profile=profile,
     ))
     click.echo(f"Registered: {result['email']}")
-    if "token" in result:
-        click.echo(f"Token: {result['token']}")
 
 
 @users.command("update-profile")
@@ -481,26 +448,11 @@ def users_revoke(email):
     click.echo(f"Revoked: {email}")
 
 
-@main.group()
-def tokens():
-    """Manage tokens on a deployed instance."""
-    pass
-
-
-@tokens.command("create")
-@click.argument("email")
-def tokens_create(email):
-    """Create a new token for an existing user."""
-    result = _run(_client().create_token(email))
-    click.echo(f"Token for {result['email']}: {result['token']}")
-
-
 @main.command()
-@click.option("--user", default=None, help="User email for MCP probe. Auto-picks first user if omitted.")
 @click.option("--json", "as_json", is_flag=True, help="JSON output.")
-def probe(user, as_json):
-    """Probe a deployed instance: health + MCP tools round-trip."""
-    result = _run(_client().probe(user_email=user))
+def probe(as_json):
+    """Probe a deployed instance: health + OAuth front door, no sign-in needed."""
+    result = _run(_client().probe())
     if as_json:
         click.echo(json.dumps(result, indent=2))
     else:
@@ -509,27 +461,19 @@ def probe(user, as_json):
 
 @main.command()
 @click.argument("name")
-@click.option("--user", default=None, help="Mint a fresh token for this user. Otherwise uses a placeholder.")
 @click.option("--client", "clients", multiple=True, type=click.Choice(["claude", "agy", "claude.ai"]),
               help="Limit to specific client(s).")
 @click.option("--scope", "scopes", multiple=True, type=click.Choice(["user", "project"]),
               help="Limit to specific scope(s).")
 @click.option("--detect", is_flag=True, help="Check if already registered in each client.")
 @click.option("--json", "as_json", is_flag=True, help="JSON output.")
-def register(name, user, clients, scopes, detect, as_json):
+def register(name, clients, scopes, detect, as_json):
     """Generate MCP client registration commands for a deployed instance."""
     from mcp_app.registration import generate_registrations, format_registrations
 
-    resolved_url = _resolve_url()
-    token = None
-    if user:
-        result = _run(_client().create_token(user))
-        token = result["token"]
-
     reg = generate_registrations(
         name=name,
-        url=resolved_url,
-        token=token,
+        url=_resolve_url(),
         clients=list(clients) or None,
         scopes=list(scopes) or None,
         detect_registered=detect,
@@ -560,7 +504,7 @@ def admin_target(app_name: str) -> str:
         raise click.ClickException(
             f"Not configured. Run:\n"
             f"  {app_name}-admin connect local\n"
-            f"  {app_name}-admin connect <url> --signing-key xxx"
+            f"  {app_name}-admin connect <url>"
         )
     return "local" if cfg.get("mode") == "local" else "remote"
 
@@ -578,11 +522,7 @@ def admin_store(app_name: str):
         from mcp_app.data_store import FileSystemUserDataStore
         from mcp_app.bridge import DataStoreAuthAdapter
         return DataStoreAuthAdapter(FileSystemUserDataStore(app_name=app_name))
-    from mcp_app.admin_client import RemoteAuthAdapter
-    return RemoteAuthAdapter(
-        _resolve_url(None, app_name),
-        _resolve_signing_key(None, app_name),
-    )
+    return _client(app_name=app_name)
 
 
 async def _with_admin_store(app_name: str, work):
@@ -607,20 +547,15 @@ def _require_remote_adapter(app_name: str | None):
     Raises ClickException with actionable hints when the connection is
     local-only or not configured.
     """
-    from mcp_app.admin_client import RemoteAuthAdapter
     cfg = _load_setup(app_name)
     if cfg.get("mode") == "local":
         raise click.ClickException(
-            "This command requires a remote connection. "
-            "Run 'connect <url> --signing-key <key>'."
+            "This command requires a remote connection. Run 'connect <url>'."
         )
-    return RemoteAuthAdapter(
-        _resolve_url(None, app_name),
-        _resolve_signing_key(None, app_name),
-    )
+    return _client(app_name=app_name)
 
 
-def _safe_tool_command(invoke, as_json, user, app_name: str | None):
+def _safe_tool_command(invoke, as_json, app_name: str | None):
     """Shared body for the `safe-tool` command on both CLIs.
 
     The endpoint carries metadata only — when ``--invoke`` is passed
@@ -642,7 +577,7 @@ def _safe_tool_command(invoke, as_json, user, app_name: str | None):
             if invoke and envelope.get("supported"):
                 tool = envelope["tool"]
                 result = await adapter.call_tool(
-                    tool["name"], tool.get("arguments") or {}, user_email=user
+                    tool["name"], tool.get("arguments") or {}
                 )
             return envelope, result
         finally:
@@ -661,7 +596,6 @@ def _safe_tool_command(invoke, as_json, user, app_name: str | None):
             )
         envelope["invocation"] = result["invocation"]
         envelope["result"] = result["result"]
-        envelope["probed_as"] = result["probed_as"]
 
     if as_json:
         click.echo(json.dumps(envelope, indent=2))
@@ -669,12 +603,12 @@ def _safe_tool_command(invoke, as_json, user, app_name: str | None):
         _print_safe_tool_envelope(envelope)
 
 
-def _tools_list_command(as_json, user, app_name: str | None):
+def _tools_list_command(as_json, app_name: str | None):
     """Shared body for `tools list`."""
     adapter = _require_remote_adapter(app_name)
-    tools, probed_as = _run_probe(adapter.list_tools(user_email=user))
+    tools = _run_probe(adapter.list_tools())
     if as_json:
-        click.echo(json.dumps({"tools": tools, "probed_as": probed_as}, indent=2))
+        click.echo(json.dumps({"tools": tools}, indent=2))
         return
     if not tools:
         click.echo("(no tools)")
@@ -688,7 +622,7 @@ def _tools_list_command(as_json, user, app_name: str | None):
     click.echo(f"({len(tools)} tools — run `{cmd_hint} tools show <name>` for schema)")
 
 
-def _tools_show_command(name, as_json, user, app_name: str | None):
+def _tools_show_command(name, as_json, app_name: str | None):
     """Shared body for `tools show <name>`.
 
     Single asyncio.run cycle + explicit client close so the
@@ -700,11 +634,11 @@ def _tools_show_command(name, as_json, user, app_name: str | None):
 
     async def _do_show():
         try:
-            return await adapter.list_tools(user_email=user)
+            return await adapter.list_tools()
         finally:
             await adapter.aclose()
 
-    tools, _ = _run_probe(_do_show())
+    tools = _run_probe(_do_show())
     matches = [t for t in tools if t["name"] == name]
     if not matches:
         cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
@@ -719,7 +653,7 @@ def _tools_show_command(name, as_json, user, app_name: str | None):
     _render_tool_show(tool, cmd_hint)
 
 
-def _tools_call_command(name, arg_pairs, json_body, as_json, user, app_name: str | None):
+def _tools_call_command(name, arg_pairs, json_body, as_json, app_name: str | None):
     """Shared body for `tools call <name>`.
 
     Runs schema-lookup (list_tools) AND the tools/call invocation inside
@@ -743,7 +677,7 @@ def _tools_call_command(name, arg_pairs, json_body, as_json, user, app_name: str
                         "--json must be a JSON object (not array/scalar)."
                     )
             else:
-                tools, _ = await adapter.list_tools(user_email=user)
+                tools = await adapter.list_tools()
                 matches = [t for t in tools if t["name"] == name]
                 if not matches:
                     cmd_hint = f"{app_name}-admin" if app_name else "mcp-app"
@@ -754,7 +688,7 @@ def _tools_call_command(name, arg_pairs, json_body, as_json, user, app_name: str
                 arguments = _parse_args_pairs(
                     arg_pairs, matches[0].get("inputSchema")
                 )
-            return await adapter.call_tool(name, arguments, user_email=user)
+            return await adapter.call_tool(name, arguments)
         finally:
             await adapter.aclose()
 
@@ -776,19 +710,17 @@ def _add_safe_tool_command(cli: click.Group, app_name: str | None):
     @cli.command("safe-tool")
     @click.option("--invoke", is_flag=True,
                   help="Invoke the declared safe tool end-to-end.")
-    @click.option("--user", default=None,
-                  help="Mint a token for this user. Otherwise uses first registered user.")
     @click.option("--json", "as_json", is_flag=True,
                   help="Structured JSON envelope output for agents.")
-    def safe_tool(invoke, user, as_json):
+    def safe_tool(invoke, as_json):
         """Show or invoke this deployment's declared safe tool.
 
         Without --invoke: shows the declaration only (cheap, no
-        upstream call). With --invoke: performs the full MCP
-        handshake using a freshly minted user token. Either way,
-        --json emits the canonical agent-consumption envelope.
+        upstream call). With --invoke: performs the MCP call as the
+        signed-in administrator. Either way, --json emits the
+        canonical agent-consumption envelope.
         """
-        _safe_tool_command(invoke, as_json, user, app_name)
+        _safe_tool_command(invoke, as_json, app_name)
 
 
 def _add_tools_group(cli: click.Group, app_name: str | None):
@@ -798,21 +730,17 @@ def _add_tools_group(cli: click.Group, app_name: str | None):
         pass
 
     @tools.command("list")
-    @click.option("--user", default=None,
-                  help="Mint a token for this user. Otherwise uses first registered user.")
     @click.option("--json", "as_json", is_flag=True, help="JSON output.")
-    def tools_list(user, as_json):
+    def tools_list(as_json):
         """Enumerate the tools the deployment exposes."""
-        _tools_list_command(as_json, user, app_name)
+        _tools_list_command(as_json, app_name)
 
     @tools.command("show")
     @click.argument("name")
-    @click.option("--user", default=None,
-                  help="Mint a token for this user. Otherwise uses first registered user.")
     @click.option("--json", "as_json", is_flag=True, help="JSON output of the raw tool schema.")
-    def tools_show(name, user, as_json):
+    def tools_show(name, as_json):
         """Show schema and example invocation for a named tool."""
-        _tools_show_command(name, as_json, user, app_name)
+        _tools_show_command(name, as_json, app_name)
 
     # `--json` here is the output-format flag (consistent with the rest
     # of the admin CLI); the JSON body literal goes through `--body` to
@@ -824,12 +752,10 @@ def _add_tools_group(cli: click.Group, app_name: str | None):
                   help="Argument as key=value. Repeatable. Scalars only — use --body for objects.")
     @click.option("--body", "json_body", default=None,
                   help="Full arguments JSON object, or @path to a file.")
-    @click.option("--user", default=None,
-                  help="Mint a token for this user. Otherwise uses first registered user.")
     @click.option("--json", "as_json", is_flag=True, help="JSON envelope output.")
-    def tools_call(name, arg_pairs, json_body, user, as_json):
+    def tools_call(name, arg_pairs, json_body, as_json):
         """Invoke a tool with the given arguments and print the response."""
-        _tools_call_command(name, arg_pairs, json_body, as_json, user, app_name)
+        _tools_call_command(name, arg_pairs, json_body, as_json, app_name)
 
 
 def create_mcp_cli(app) -> click.Group:
@@ -862,7 +788,7 @@ def create_mcp_cli(app) -> click.Group:
 
 
 def create_admin_cli(app_name: str) -> click.Group:
-    """Create the admin CLI for an app (connect, users, tokens, health).
+    """Create the admin CLI for an app (connect, users, health, probe, register).
 
     Dynamically generates typed CLI flags from the registered profile
     model (if expand=True) or accepts --profile for object input.
@@ -881,21 +807,19 @@ def create_admin_cli(app_name: str) -> click.Group:
 
     @cli.command()
     @click.argument("target")
-    @click.option("--signing-key", default=None)
-    def connect(target, signing_key):
+    def connect(target):
         """Configure admin target: 'local', 'remote', or a URL.
 
-        The saved remote (URL and signing key) is kept when switching to
-        'local'; 'remote' switches back to it. A URL without --signing-key
-        reuses the saved key when the URL is unchanged.
+        The saved remote URL is kept when switching to 'local';
+        'remote' switches back to it.
 
         \b
         Examples:
-          connect https://my-app.run.app --signing-key xxx
+          connect https://my-app.run.app
           connect local
           connect remote
         """
-        _connect_handler(target, signing_key, app_name=app_name)
+        _connect_handler(target, app_name=app_name)
 
     @cli.command()
     def health():
@@ -904,12 +828,7 @@ def create_admin_cli(app_name: str) -> click.Group:
         if cfg.get("mode") == "local":
             click.echo("Local mode — no remote health check.")
             return
-        from mcp_app.admin_client import RemoteAuthAdapter
-        adapter = RemoteAuthAdapter(
-            _resolve_url(None, app_name),
-            _resolve_signing_key(None, app_name),
-        )
-        result = _run(adapter.health_check())
+        result = _run(_client(app_name=app_name).health_check())
         click.echo(f"{result['status']} ({result['status_code']})")
 
     @cli.group()
@@ -964,7 +883,7 @@ def create_admin_cli(app_name: str) -> click.Group:
         email = kwargs.pop("email")
 
         store = admin_store(app_name)
-        existing = _run(store.get(email))
+        existing = _run_probe(store.get(email))
         if existing:
             raise click.ClickException(
                 f"User already exists: {email}. "
@@ -982,13 +901,11 @@ def create_admin_cli(app_name: str) -> click.Group:
                 profile = _validate_profile(profile)
 
         store = admin_store(app_name)
-        result = _run(store.save(
+        result = _run_probe(store.save(
             UserAuthRecord(email=email, created=datetime.now(timezone.utc)),
             profile=profile,
         ))
         click.echo(f"Added: {result['email']}")
-        if "token" in result:
-            click.echo(f"Token: {result['token']}")
 
     # Build users update-profile dynamically from profile model
     if model and expand:
@@ -1089,27 +1006,20 @@ def create_admin_cli(app_name: str) -> click.Group:
         click.echo(f"Revoked: {email}")
 
     @cli.command()
-    @click.option("--user", default=None, help="User email for MCP probe. Auto-picks first user if omitted.")
     @click.option("--json", "as_json", is_flag=True, help="JSON output.")
-    def probe(user, as_json):
-        """Probe the configured instance: health + MCP tools round-trip."""
+    def probe(as_json):
+        """Probe the configured instance: health + OAuth front door, no sign-in needed."""
         cfg = _load_setup(app_name)
         if cfg.get("mode") == "local":
             click.echo("Local mode — probe is for remote instances only.")
             return
-        from mcp_app.admin_client import RemoteAuthAdapter
-        adapter = RemoteAuthAdapter(
-            _resolve_url(None, app_name),
-            _resolve_signing_key(None, app_name),
-        )
-        result = _run(adapter.probe(user_email=user))
+        result = _run(_client(app_name=app_name).probe())
         if as_json:
             click.echo(json.dumps(result, indent=2))
         else:
             _print_probe(result)
 
     @cli.command()
-    @click.option("--user", default=None, help="Mint a fresh token for this user.")
     @click.option("--client", "clients", multiple=True,
                   type=click.Choice(["claude", "agy", "claude.ai"]),
                   help="Limit to specific client(s).")
@@ -1118,7 +1028,7 @@ def create_admin_cli(app_name: str) -> click.Group:
                   help="Limit to specific scope(s).")
     @click.option("--detect", is_flag=True, help="Check if already registered in each client.")
     @click.option("--json", "as_json", is_flag=True, help="JSON output.")
-    def register(user, clients, scopes, detect, as_json):
+    def register(clients, scopes, detect, as_json):
         """Generate MCP client registration commands for the configured instance."""
         from mcp_app.registration import generate_registrations, format_registrations
 
@@ -1126,17 +1036,10 @@ def create_admin_cli(app_name: str) -> click.Group:
         if cfg.get("mode") == "local":
             click.echo("Local mode — register is for remote instances only.")
             return
-        resolved_url = _resolve_url(None, app_name)
-        token = None
-        if user:
-            store = admin_store(app_name)
-            result = _run(store.create_token(user))
-            token = result["token"]
 
         reg = generate_registrations(
             name=app_name,
-            url=resolved_url,
-            token=token,
+            url=_resolve_url(None, app_name),
             clients=list(clients) or None,
             scopes=list(scopes) or None,
             detect_registered=detect,
@@ -1145,27 +1048,6 @@ def create_admin_cli(app_name: str) -> click.Group:
             click.echo(json.dumps(reg, indent=2))
         else:
             click.echo(format_registrations(reg))
-
-    @cli.group()
-    def tokens():
-        """Manage tokens."""
-        pass
-
-    @tokens.command("create")
-    @click.argument("email")
-    def tokens_create(email):
-        """Create a new token for an existing user."""
-        cfg = _load_setup(app_name)
-        if cfg.get("mode") == "local":
-            click.echo("Tokens are for remote instances only.")
-            return
-        from mcp_app.admin_client import RemoteAuthAdapter
-        adapter = RemoteAuthAdapter(
-            _resolve_url(None, app_name),
-            _resolve_signing_key(None, app_name),
-        )
-        result = _run(adapter.create_token(email))
-        click.echo(f"Token for {result['email']}: {result['token']}")
 
     _add_safe_tool_command(cli, app_name=app_name)
     _add_tools_group(cli, app_name=app_name)

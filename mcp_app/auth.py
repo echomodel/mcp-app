@@ -1,20 +1,18 @@
-"""Authentication modes for ``App.auth``.
+"""Authentication for HTTP mode: standard MCP authorization.
 
-Two modes exist while the shared-secret model is phased out:
+mcp-app is an OAuth 2.1 *resource server*. An external authorization
+server (an identity provider, typically fronting Sign in with Google)
+signs the user in and issues the access token. mcp-app validates the
+token against the issuer's published keys, maps the token's email claim
+to a user record, and publishes RFC 9728 protected-resource metadata so
+an MCP client discovers the issuer from the server URL alone.
 
-* :class:`SharedSecretJWT` — the 1.x model. mcp-app issues user tokens
-  itself, signed with ``SIGNING_KEY``. Still the default when nothing
-  else is configured, so every existing deployment keeps working.
-* :class:`OAuthResourceServer` — standard MCP authorization. An external
-  OAuth 2.1 authorization server (an identity provider) issues the
-  tokens; mcp-app is a resource server that validates them against the
-  issuer's JWKS, maps the token's email claim to a user record, and
-  publishes RFC 9728 protected-resource metadata so MCP clients can
-  discover the issuer from the server URL alone.
-
-Selection: ``App(auth=...)`` wins. Otherwise, ``AUTH_ISSUER`` in the
-environment selects :class:`OAuthResourceServer` (built from env), and
-its absence selects :class:`SharedSecretJWT`.
+Configuration is the issuer and the administrators. Everything about
+*this* server (its public URL, and therefore the audience a token must
+carry and the ``resource`` it advertises) is read from each request's
+``Host`` header, which on any hostname-routing front door is the same
+fact that delivered the request. ``AUTH_AUDIENCE`` pins it for the
+rare deployment reached by address rather than by name.
 """
 
 from __future__ import annotations
@@ -23,129 +21,160 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 import jwt as pyjwt
 from jwt import PyJWKSet
-from pydantic import AnyHttpUrl
 
 from mcp_app.context import current_user, hydrate_profile
+from mcp_app.models import UserAuthRecord
 
 logger = logging.getLogger("mcp_app.auth")
+startup_logger = logging.getLogger("mcp_app.startup")
 
 # Signature algorithms accepted from the issuer. Asymmetric only: a resource
 # server never holds the issuer's signing secret, so HMAC is excluded by
 # construction.
 ALLOWED_ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "ES512")
 
-
+ENV_ISSUER = "AUTH_ISSUER"
+ENV_AUDIENCE = "AUTH_AUDIENCE"
+ENV_EMAIL_CLAIM = "AUTH_EMAIL_CLAIM"
+ENV_JWKS_URI = "AUTH_JWKS_URI"
 ENV_ADMIN_EMAILS = "ADMIN_EMAILS"
+
+METADATA_PATH = "/.well-known/oauth-protected-resource"
 
 
 def admin_emails() -> frozenset[str]:
     """Operator-declared administrators: ``ADMIN_EMAILS``, comma-separated.
 
-    Membership is the whole admin model in OAuth mode: nothing is stored,
-    there is no promotion path, and changing the set is a redeploy.
-    Compared lower-cased.
+    Membership is the whole admin model: nothing is stored, there is no
+    promotion path, and changing the set is a redeploy. Compared
+    lower-cased.
     """
     raw = os.environ.get(ENV_ADMIN_EMAILS, "")
     return frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
 
 
-@dataclass(frozen=True)
-class SharedSecretJWT:
-    """The 1.x auth model: self-issued HS256 user tokens under ``SIGNING_KEY``.
+def request_base_url(scope: dict) -> str:
+    """The public base URL of this server as the caller reached it.
 
-    Carries no configuration of its own; ``SIGNING_KEY`` and ``JWT_AUD``
-    are read from the environment as before.
+    Scheme from the ASGI scope (uvicorn fills it from ``X-Forwarded-Proto``
+    when run through ``App.serve``), host from the ``Host`` header. The
+    ``X-Forwarded-Host`` header is deliberately ignored: any client can add
+    it, whereas ``Host`` is what routed the request here. Always ends in
+    ``/``, which is the form an MCP client types and an issuer registers.
     """
+    host = ""
+    for name, value in scope.get("headers", []):
+        if name.lower() == b"host":
+            host = value.decode("latin-1").strip()
+            break
+    if not host:
+        server = scope.get("server") or ("localhost", None)
+        host = server[0] if server[1] in (None, 80, 443) else f"{server[0]}:{server[1]}"
+    scheme = scope.get("scheme", "http")
+    return f"{scheme}://{host}/"
 
 
 @dataclass
 class OAuthResourceServer:
-    """Validate bearer tokens issued by an external OAuth 2.1 authorization server.
+    """How HTTP callers are authenticated: tokens from an external issuer.
 
     Args:
         issuer: The authorization server's issuer identifier, exactly as it
             appears in the token's ``iss`` claim (trailing slash included if
-            the issuer uses one).
-        audience: Value the token's ``aud`` claim must contain. Usually the
-            API identifier registered at the issuer for this server.
-        resource_url: The public URL MCP clients use for this server. It is
-            the ``resource`` in the protected-resource metadata document and
-            determines where that document is served.
+            the issuer uses one). From ``AUTH_ISSUER``.
         email_claim: Name of the claim carrying the user's email. ``email``
             by default; issuers that namespace custom claims need the full
-            claim name (for example ``https://example.com/email``).
+            claim name (for example ``https://example.com/email``). From
+            ``AUTH_EMAIL_CLAIM``.
+        audience: Value the token's ``aud`` claim must contain. ``None``
+            (default) means the server's own URL as each request reached
+            it, which is the API identifier an operator registers at the
+            issuer. Set it only for a deployment reached by address rather
+            than hostname, or one answering on several hostnames. From
+            ``AUTH_AUDIENCE``.
         jwks_uri: Where to fetch the issuer's signing keys. Default: the
             ``jwks_uri`` from the issuer's OpenID discovery document, falling
-            back to ``<issuer>/.well-known/jwks.json``.
+            back to ``<issuer>/.well-known/jwks.json``. From ``AUTH_JWKS_URI``.
         jwks: A static JWK Set (``{"keys": [...]}``). When given, no key is
-            ever fetched. Intended for tests and air-gapped deployments.
+            ever fetched. For tests and air-gapped deployments; not read
+            from the environment.
     """
 
     issuer: str
-    audience: str
-    resource_url: str
     email_claim: str = "email"
+    audience: str | None = None
     jwks_uri: str | None = None
     jwks: dict | None = field(default=None, repr=False)
 
-    ENV_ISSUER = "AUTH_ISSUER"
-    ENV_AUDIENCE = "AUTH_AUDIENCE"
-    ENV_RESOURCE_URL = "MCP_RESOURCE_URL"
-    ENV_EMAIL_CLAIM = "AUTH_EMAIL_CLAIM"
-    ENV_JWKS_URI = "AUTH_JWKS_URI"
-
     @classmethod
-    def from_env(cls) -> "OAuthResourceServer | None":
-        """Build from environment variables, or return ``None`` if unset.
-
-        ``AUTH_ISSUER``, ``AUTH_AUDIENCE`` and ``MCP_RESOURCE_URL`` must be
-        set together. A partial set is a misconfiguration and raises, rather
-        than silently falling back to the shared-secret model.
-        """
-        required = {
-            cls.ENV_ISSUER: os.environ.get(cls.ENV_ISSUER, "").strip(),
-            cls.ENV_AUDIENCE: os.environ.get(cls.ENV_AUDIENCE, "").strip(),
-            cls.ENV_RESOURCE_URL: os.environ.get(cls.ENV_RESOURCE_URL, "").strip(),
-        }
-        if not any(required.values()):
-            return None
-        missing = [k for k, v in required.items() if not v]
-        if missing:
+    def from_env(cls) -> "OAuthResourceServer":
+        """Build from the environment. ``AUTH_ISSUER`` is required for HTTP."""
+        issuer = os.environ.get(ENV_ISSUER, "").strip()
+        if not issuer:
             raise RuntimeError(
-                "OAuth resource-server mode needs AUTH_ISSUER, AUTH_AUDIENCE and "
-                f"MCP_RESOURCE_URL together; missing: {', '.join(missing)}."
+                f"{ENV_ISSUER} is required to serve HTTP: the OAuth 2.1 "
+                "authorization server (identity provider) that issues tokens "
+                "for this server, e.g. https://your-tenant.us.auth0.com/. "
+                f"Set {ENV_ADMIN_EMAILS} as well, or nobody can administer it."
             )
         return cls(
-            issuer=required[cls.ENV_ISSUER],
-            audience=required[cls.ENV_AUDIENCE],
-            resource_url=required[cls.ENV_RESOURCE_URL],
-            email_claim=os.environ.get(cls.ENV_EMAIL_CLAIM, "").strip() or "email",
-            jwks_uri=os.environ.get(cls.ENV_JWKS_URI, "").strip() or None,
+            issuer=issuer,
+            email_claim=os.environ.get(ENV_EMAIL_CLAIM, "").strip() or "email",
+            audience=os.environ.get(ENV_AUDIENCE, "").strip() or None,
+            jwks_uri=os.environ.get(ENV_JWKS_URI, "").strip() or None,
         )
 
-    def protected_resource_routes(self):
-        """RFC 9728 metadata route(s), built by the MCP SDK.
+    def audience_for(self, base_url: str) -> str:
+        """The audience a token must carry for a request that reached ``base_url``."""
+        return self.audience or base_url
 
-        Served at ``/.well-known/oauth-protected-resource`` (plus the
-        resource path, if ``resource_url`` has one). Public: clients read
-        it before they have a token.
+    def log_startup(self) -> None:
+        """One factual line about the auth configuration, in the data_dir style."""
+        aud = self.audience or f"<derived from request Host; set {ENV_AUDIENCE} to pin>"
+        admins = len(admin_emails())
+        startup_logger.info(
+            f"auth issuer={self.issuer} audience={aud} "
+            f"email_claim={self.email_claim} admin_emails={admins}"
+        )
+        if admins == 0:
+            startup_logger.warning(
+                f"{ENV_ADMIN_EMAILS} is empty: no one can call /admin or "
+                "bootstrap the first user"
+            )
+
+    def protected_resource_route(self):
+        """RFC 9728 metadata, built per request from the URL the caller used.
+
+        Public: clients read it before they hold a token. The ``resource``
+        is the URL the client reached us by, so it matches what the client
+        typed; the SDK's metadata model supplies the field names and the
+        hour-long cache header.
         """
-        from mcp.server.auth.routes import create_protected_resource_routes
+        from mcp.server.auth.routes import ProtectedResourceMetadataHandler, cors_middleware
+        from mcp.shared.auth import ProtectedResourceMetadata
+        from pydantic import AnyHttpUrl
+        from starlette.routing import Route
 
-        return create_protected_resource_routes(
-            resource_url=AnyHttpUrl(self.resource_url),
-            authorization_servers=[AnyHttpUrl(self.issuer)],
+        issuer = self.issuer
+
+        async def handle(request):
+            metadata = ProtectedResourceMetadata(
+                resource=AnyHttpUrl(request_base_url(request.scope)),
+                authorization_servers=[AnyHttpUrl(issuer)],
+            )
+            return await ProtectedResourceMetadataHandler(metadata).handle(request)
+
+        return Route(
+            METADATA_PATH,
+            endpoint=cors_middleware(handle, ["GET", "OPTIONS"]),
+            methods=["GET", "OPTIONS"],
         )
-
-    def resource_metadata_url(self) -> str:
-        from mcp.server.auth.routes import build_resource_metadata_url
-
-        return str(build_resource_metadata_url(AnyHttpUrl(self.resource_url)))
 
 
 class OIDCTokenVerifier:
@@ -229,7 +258,7 @@ class OIDCTokenVerifier:
 
     # -- verification -----------------------------------------------------
 
-    async def verify_claims(self, token: str) -> dict | None:
+    async def verify_claims(self, token: str, audience: str) -> dict | None:
         """Validate signature, ``iss``, ``aud`` and ``exp``. Claims or ``None``."""
         try:
             key = await self._signing_key(token)
@@ -244,7 +273,7 @@ class OIDCTokenVerifier:
                 token,
                 key.key,
                 algorithms=list(ALLOWED_ALGORITHMS),
-                audience=self.config.audience,
+                audience=audience,
                 issuer=self.config.issuer,
                 options={"require": ["exp"]},
             )
@@ -252,7 +281,13 @@ class OIDCTokenVerifier:
             logger.info("token rejected: %s", exc)
             return None
 
-    async def resolve_user(self, token: str) -> tuple[str, Any]:
+    def email_of(self, claims: dict) -> str | None:
+        email = claims.get(self.config.email_claim)
+        if isinstance(email, str) and email:
+            return email.lower()
+        return None
+
+    async def resolve_user(self, token: str, audience: str) -> tuple[str, Any]:
         """Map a token to a user record and set ``current_user``.
 
         Returns one of:
@@ -261,25 +296,20 @@ class OIDCTokenVerifier:
             ``("invalid", reason)`` — token missing, malformed, expired, wrong
             issuer or audience, or lacking the email claim (401).
         """
-        claims = await self.verify_claims(token)
+        claims = await self.verify_claims(token, audience)
         if claims is None:
             return "invalid", "The access token is invalid or expired"
-        email = claims.get(self.config.email_claim)
-        if not isinstance(email, str) or not email:
+        email = self.email_of(claims)
+        if email is None:
             return "invalid", (
                 f"The access token carries no '{self.config.email_claim}' claim; "
                 "the authorization server must include the user's email"
             )
-        email = email.lower()
         record = await self.auth_store.get_full(email)
         if record is None and email in admin_emails():
             # An operator named in ADMIN_EMAILS is admitted by declaration;
             # the record is created on first sign-in so no `users add` is
             # needed to bootstrap a deployment.
-            from datetime import datetime, timezone
-
-            from mcp_app.models import UserAuthRecord
-
             await self.auth_store.save(
                 UserAuthRecord(email=email, created=datetime.now(timezone.utc))
             )
@@ -291,13 +321,22 @@ class OIDCTokenVerifier:
         return "ok", record
 
     async def verify_token(self, token: str):
-        """MCP SDK ``TokenVerifier`` protocol: ``AccessToken`` or ``None``."""
+        """MCP SDK ``TokenVerifier`` protocol: ``AccessToken`` or ``None``.
+
+        The SDK gives no request context here, so this path needs a
+        configured ``audience``; with a derived audience it refuses.
+        """
         from mcp.server.auth.provider import AccessToken
 
-        status, value = await self.resolve_user(token)
+        if self.config.audience is None:
+            raise RuntimeError(
+                "verify_token needs a configured audience; set "
+                f"{ENV_AUDIENCE} to use the SDK's TokenVerifier protocol"
+            )
+        status, value = await self.resolve_user(token, self.config.audience)
         if status != "ok":
             return None
-        claims = await self.verify_claims(token) or {}
+        claims = await self.verify_claims(token, self.config.audience) or {}
         return AccessToken(
             token=token,
             client_id=value.email,
@@ -310,14 +349,11 @@ class OIDCTokenVerifier:
 
 
 class OAuthAdminAuth:
-    """Admin auth for OAuth mode: the identity provider's token, for an admin email.
+    """Admin auth: the identity provider's token, for an email in ``ADMIN_EMAILS``.
 
-    A request is admin when its bearer token verifies against the issuer
-    and its email claim is in ``ADMIN_EMAILS``. No shared secret is
-    involved, and the deployment issues no user tokens of its own.
+    No shared secret is involved, and the deployment issues no user tokens
+    of its own.
     """
-
-    issues_tokens = False
 
     def __init__(self, verifier: OIDCTokenVerifier):
         self.verifier = verifier
@@ -326,11 +362,9 @@ class OAuthAdminAuth:
         auth = request.headers.get("authorization", "")
         if auth[:7].lower() != "bearer ":
             return False
-        claims = await self.verifier.verify_claims(auth[7:].strip())
+        audience = self.verifier.config.audience_for(request_base_url(request.scope))
+        claims = await self.verifier.verify_claims(auth[7:].strip(), audience)
         if not claims:
             return False
-        email = claims.get(self.verifier.config.email_claim)
-        return isinstance(email, str) and email.lower() in admin_emails()
-
-    def issue_token(self, email: str, duration_seconds: int | None = None) -> dict:
-        raise RuntimeError("OAuth resource-server mode does not issue user tokens")
+        email = self.verifier.email_of(claims)
+        return email is not None and email in admin_emails()

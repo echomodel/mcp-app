@@ -2,25 +2,23 @@
 
 The endpoint mirrors the public /health verdict but adds the full
 diagnostic detail (paths, fs_type, free bytes, mount source) that
-the public response intentionally omits. Authenticated callers only.
+the public response intentionally omits. Administrators only.
 """
 
-from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
 import httpx
-import jwt as pyjwt
 import pytest
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
 from mcp_app.admin import create_admin_app
+from mcp_app.auth import OAuthAdminAuth, OIDCTokenVerifier
 from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
 from mcp_app.storage_check import StorageCheckResult, reset_last_check
 
-
-SIGNING_KEY = "test-key-admin-health-32chars-min!!"
+from .conftest import OPERATOR
 
 
 @pytest.fixture(autouse=True)
@@ -31,23 +29,16 @@ def _reset_storage_cache():
 
 
 @pytest.fixture
-def admin_app(tmp_path, monkeypatch):
-    monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
-    monkeypatch.setenv("SIGNING_KEY", SIGNING_KEY)
-    store = FileSystemUserDataStore(app_name="test-admin-health")
-    auth_store = DataStoreAuthAdapter(store)
-    inner = create_admin_app(auth_store)
+def admin_app(auth_env, issuer):
+    auth_store = DataStoreAuthAdapter(FileSystemUserDataStore(app_name="test-admin-health"))
+    verifier = OIDCTokenVerifier(issuer.config, auth_store)
+    inner = create_admin_app(auth_store, admin_auth=OAuthAdminAuth(verifier))
     return Starlette(routes=[Mount("/admin", app=inner)])
 
 
 @pytest.fixture
-def admin_token():
-    now = datetime.now(timezone.utc)
-    return pyjwt.encode(
-        {"sub": "admin", "scope": "admin", "iat": now,
-         "exp": now + timedelta(minutes=5)},
-        SIGNING_KEY, algorithm="HS256",
-    )
+def admin_headers(issuer):
+    return issuer.headers(OPERATOR)
 
 
 def _stub(fs_type_check: str, **overrides) -> StorageCheckResult:
@@ -74,12 +65,11 @@ async def test_admin_health_requires_auth(admin_app):
 
 
 @pytest.mark.asyncio
-async def test_admin_health_returns_full_detail(admin_app, admin_token):
+async def test_admin_health_returns_full_detail(admin_app, admin_headers):
     transport = httpx.ASGITransport(app=admin_app)
-    headers = {"Authorization": f"Bearer {admin_token}"}
     with patch("mcp_app.health_check.get_last_check", return_value=_stub("ok")):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/admin/health", headers=headers)
+            resp = await client.get("/admin/health", headers=admin_headers)
 
     assert resp.status_code == 200
     body = resp.json()
@@ -96,13 +86,12 @@ async def test_admin_health_returns_full_detail(admin_app, admin_token):
 
 
 @pytest.mark.asyncio
-async def test_admin_health_reports_unhealthy_with_503_status_field(admin_app, admin_token):
+async def test_admin_health_reports_unhealthy_with_503_status_field(admin_app, admin_headers):
     """The admin endpoint reports the public status verdict including the would-be HTTP code."""
     transport = httpx.ASGITransport(app=admin_app)
-    headers = {"Authorization": f"Bearer {admin_token}"}
     with patch("mcp_app.health_check.get_last_check", return_value=_stub("mismatch")):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/admin/health", headers=headers)
+            resp = await client.get("/admin/health", headers=admin_headers)
 
     # The admin endpoint itself is 200 (the diagnostic call succeeded);
     # the body reports that public /health would return 503.

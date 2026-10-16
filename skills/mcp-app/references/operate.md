@@ -13,8 +13,17 @@ there's no healthy URL yet, stop and resolve that first.
 **Verification of a fresh deploy is not optional.** After any deploy, or
 when the running instance may have changed, climb the verification ladder
 below before calling the deploy successful. `/health` proves the process
-is up; `probe` and, when declared, `safe-tool --invoke` prove it serves
-tools to a real user. Don't substitute `curl` or cloud CLI inspection.
+is up; `probe` proves the OAuth front door; a sign-in from a real MCP
+client and a tool call prove it serves tools to a real user. Don't
+substitute `curl` or cloud CLI inspection.
+
+**What the admin CLI can and cannot do against a deployment in 2.0.**
+Remote mode supports `connect`, `health`, `probe` and `register`, none of
+which needs a credential. `users`, `tools` and `safe-tool` need a signed-in
+administrator, and the CLI does not yet sign in: against a remote they exit
+with a message saying so. They work in full against the local store
+(`connect local`). How an administrator reaches `/admin` on a deployment
+today is in `auth.md`.
 
 Three kinds of operator use this:
 
@@ -34,7 +43,7 @@ Each solution generates three commands from one `App`:
 ```bash
 my-solution              # the app's own CLI (optional)
 my-solution-mcp          # serve (HTTP) and stdio
-my-solution-admin        # connect, users, tokens, health, probe, tools, safe-tool, register
+my-solution-admin        # connect, users, health, probe, register (tools, safe-tool once signed in)
 ```
 
 ## Before you start
@@ -43,12 +52,12 @@ my-solution-admin        # connect, users, tokens, health, probe, tools, safe-to
 the current connection state before doing anything else:
 
 ```bash
-my-solution-admin health        # remote — confirms URL and auth
-my-solution-admin users list    # local or remote — confirms store access
+my-solution-admin health        # remote — confirms the URL answers
+my-solution-admin users list    # local — confirms store access
 ```
 
 If `health` prints `Local mode`, the CLI is pointed at the local store;
-`connect remote` switches back to the saved deployment without the key.
+`connect remote` switches back to the saved deployment.
 
 Do not assume the admin CLI is pointed at the right target. The
 connection may be stale from a previous session, pointed at a
@@ -90,39 +99,37 @@ Then connect:
 ```bash
 # Per-app CLI (preferred) — local or remote
 my-solution-admin connect local
-my-solution-admin connect https://your-service --signing-key xxx
+my-solution-admin connect https://your-service
 
 # Generic CLI (fallback) — remote only
-mcp-app connect https://your-service --signing-key xxx
+mcp-app connect https://your-service
 ```
 
 `connect local` is only available on the per-app CLI — the
 generic CLI doesn't know which app's store to locate.
 
-A remote `connect` needs the deployment's signing key. Where to find it,
-and what to do when the agent isn't allowed to read it, is in `auth.md`.
-`connect` saves the target in `~/.config/{name}/setup.json`, so later
-commands take no URL or key. `connect local` switches to the local store
-and keeps the saved remote; `connect remote` switches back without the key.
+A remote `connect` takes the URL and nothing else; it prints the
+deployment's endpoints (MCP, admin, discovery, health). `connect` saves
+the target in `~/.config/{name}/setup.json`, so later commands take no
+URL. `connect local` switches to the local store and keeps the saved
+remote; `connect remote` switches back.
 
 
 ## Verify the deployment
 
-The verification ladder has six rungs. Stop at the first one
-that reveals the issue; otherwise climb until the deployment is
-fully validated.
+The verification ladder has four rungs. Stop at the first one that
+reveals the issue; otherwise climb until the deployment is validated.
 
 1. **`connect`** — point the admin CLI at the deployment.
-2. **`probe`** — framework layer (liveness, admin auth,
-   `tools/list` round-trip).
-3. **`tools list`** — confirm the solution's tools module
-   loaded and tool names match expectations.
-4. **`tools show <name>`** — when the schema for a specific
-   tool needs a sanity check.
-5. **`safe-tool --invoke`** — opinionated end-to-end smoke
-   test (only if the solution declared one).
-6. **`tools call <name>`** — debug a specific tool with custom
-   arguments when steps 2–5 leave a gap.
+2. **`probe`** — liveness, the discovery document, and the 401
+   challenge: the OAuth front door an MCP client needs.
+3. **`register`, then sign in from a real MCP client** — the operator
+   adds the URL in their client, signs in, and calls a tool. This is
+   the end-to-end proof: identity provider, token validation, the
+   user record, the MCP layer, and tool wiring.
+4. **`safe-tool --invoke` / `tools call <name>`** — opinionated or
+   ad-hoc tool invocation from the CLI, once the CLI can sign in
+   (not in 2.0 against a remote; see above).
 
 ### Probe
 
@@ -133,33 +140,49 @@ my-solution-admin probe
 Output:
 ```
 URL: https://your-service
+  Endpoints:
+    MCP        https://your-service/           JSON-RPC, bearer token from the identity provider
+    Admin      https://your-service/admin/*    admin REST, an administrator's token
+    Discovery  https://your-service/.well-known/oauth-protected-resource  public
+    Health     https://your-service/health     public
 Health: healthy
-MCP: ok (probed as alice@example.com)
-Tools (3):
-  do_thing
-  list_items
-  get_status
+OAuth: ok — issuer https://login.example.com/, resource https://your-service/
+  Unauthenticated requests get the 401 challenge; an MCP client can
+  discover the issuer and sign the user in. Add the URL in a client to go further.
 ```
 
-This hits `/health` for liveness, then does an MCP `tools/list`
-round-trip using a short-lived token minted for an existing
-user. If it reports tools, the framework layer is operational —
-health, admin auth, user auth, MCP transport, and tool wiring
-all work.
+Probe hits `/health`, reads `/.well-known/oauth-protected-resource`, and
+sends one unauthenticated MCP request to confirm it gets a `401` whose
+`WWW-Authenticate` points at that document. No sign-in and no user is
+needed. If it reports `OAuth: ok`, an MCP client can sign a user in.
 
-If no users are registered yet, probe reports liveness only
-and tells you it can't do the MCP round-trip. Register a user
-first (Manage users, below), then probe again.
+Read the two values it prints: `issuer` must be the identity provider
+the operator intended, and `resource` must be the URL users type. A
+`resource` that differs (a wrong scheme, an internal hostname) means the
+front door is rewriting `Host` or not forwarding `X-Forwarded-Proto`;
+fix the proxy, or pin `AUTH_AUDIENCE` (`auth.md`).
 
 For structured output (agent consumption):
 ```bash
 my-solution-admin probe --json
 ```
 
+### Sign in from a client
+
+```bash
+my-solution-admin register
+```
+
+prints the registration command for each MCP client. The operator runs
+the one for theirs, signs in when the client sends them to the identity
+provider, and calls a tool. An `ADMIN_EMAILS` entry is admitted on first
+sign-in, so this works on a deployment with no users. Any other email
+gets a `403` until an administrator registers it (`auth.md`).
+
 ### Tools list and show
 
-`probe` confirms the framework layer. `tools list` is a quick
-sanity check that the right tools are exposed:
+`tools list` and `tools show <name>` do an MCP `tools/list` round-trip as
+a signed-in administrator:
 
 ```bash
 my-solution-admin tools list
@@ -168,20 +191,10 @@ my-solution-admin tools list --json     # for agent consumption
 ```
 
 `tools show <name>` renders the description, arguments with
-type/required-ness, and a copy-pasteable `tools call`
-invocation example. Useful when you don't remember a tool's
-schema or want to debug a specific tool's contract before
-calling it.
+type/required-ness, and a copy-pasteable `tools call` invocation example.
 
-**Requires a registered user.** Unlike `probe`, which can
-report liveness-only when the deployment has no users,
-`tools list` and `tools show` mint a per-user probe token to
-do the MCP `tools/list` round-trip. On a deployment with no
-registered users they exit with a clean error pointing at
-`users add` rather than degrading to a liveness check —
-because there's no useful "tools list" output to render
-without the round-trip. Run `users add` (Manage users, below) first if
-you haven't.
+**Needs a sign-in.** Against a remote in 2.0 they exit with the
+not-signed-in message; the equivalent check is the client sign-in above.
 
 ### Safe tool (deeper than probe)
 
@@ -202,18 +215,15 @@ an operator can copy and replay it manually in a debugger or
 another terminal, with a different bearer token, etc. After the
 call it prints the HTTP status code and the full response body.
 
-**`safe-tool --invoke` requires a registered user** for the
-same reason as `tools list/show`: the round-trip mints a
-per-user probe token. The bare `safe-tool` (no `--invoke`)
-only fetches the declaration metadata and does not need a
-user — handy for confirming the safe tool is declared on a
-fresh deployment before you've added any users.
+**Both forms need a signed-in administrator**: the declaration lives
+behind `/admin/safe-tool`, and the invocation is an MCP call. Against a
+remote in 2.0 they exit with the not-signed-in message.
 
 #### Failure-mode table
 
 | `probe` | `safe-tool --invoke` | Likely problem |
 |---|---|---|
-| ❌ | n/a | Framework layer — see the probe decision tree in `troubleshooting.md`. |
+| ❌ | n/a | Front door — see the probe decision tree in `troubleshooting.md`. |
 | ✅ | `supported: false` | Solution didn't declare a safe tool. Either accept this and rely on probe, or declare one. |
 | ✅ | non-200 status | Solution-specific tool failed. Inspect `result.body` for the JSON-RPC error. |
 | ✅ | 200 but empty / missing | Tool wired but upstream credential is invalid/expired/revoked. Use `users update-profile` to rotate the credential field. |
@@ -240,7 +250,6 @@ a different tool with custom arguments to isolate an issue:
 my-solution-admin tools call <name> --arg k=v --arg k2=v2
 my-solution-admin tools call <name> --body '{"k": "v"}'
 my-solution-admin tools call <name> --body @args.json
-my-solution-admin tools call <name> --user alice@example.com   # mint as alice
 ```
 
 `--arg` is for scalars (booleans, numbers, strings, null) and
@@ -256,14 +265,20 @@ running it interactively are implicitly accepting that.
 # Liveness
 curl https://your-service/health
 
-# Admin auth
-my-solution-admin users list
+# Discovery document an MCP client reads first
+curl https://your-service/.well-known/oauth-protected-resource
 
-# User auth — tools/list with a user token
-curl -X POST https://your-service/ \
-  -H "Authorization: Bearer USER_TOKEN" \
+# The 401 challenge (look at WWW-Authenticate)
+curl -i -X POST https://your-service/ \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}'
+
+# The same call with a user's token from the identity provider
+curl -X POST https://your-service/ \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}'
 ```
 
@@ -282,8 +297,10 @@ my-solution-admin users add alice@example.com --<field> <value>
 
 `users add` rejects existing users, so an API-proxy user's stored
 credentials can't be overwritten by accident. If the user already
-exists, use `update-profile` instead. `users add` prints the user's
-token; issuing, revoking, and rotating tokens is in `auth.md`.
+exists, use `update-profile` instead. `users add` prints nothing to
+hand the user: they sign in from their MCP client with their own
+account (`auth.md`). Against a remote in 2.0, register through
+`POST /admin/users` with an administrator's token instead (`auth.md`).
 
 To discover what profile fields the app expects, check the
 `--help` output — field names and descriptions are generated
@@ -331,64 +348,65 @@ fields are preserved.
 # List all users
 my-solution-admin users list
 
-# Revoke a user (invalidates all their tokens immediately)
+# Revoke a user (their next request is a 403; `users add` re-admits)
 my-solution-admin users revoke alice@example.com
-
-# Issue a new token for an existing user
-my-solution-admin tokens create alice@example.com
 ```
 
 
 ## Register MCP clients
 
-Use `register` to generate ready-to-paste commands:
+Use `register` to generate ready-to-paste commands for the connected
+deployment:
 
 ```bash
-# With a real token (mints one for the user)
-my-solution-admin register --user alice@example.com
-
-# With a placeholder (operator substitutes later)
 my-solution-admin register
+my-solution-admin register --json                      # structured output
+my-solution-admin register --client claude --scope user
+my-solution-admin register --detect                    # mark what's already registered
 ```
 
-This outputs commands for Claude Code, Antigravity CLI (`agy`),
-and the Claude.ai URL form, with the URL and token already
-substituted. agy has one user-level config, so it gets a single
-command with no scope.
+Output:
+```
+claude (user scope, status unknown):
+  claude mcp add --transport http -s user my-solution https://your-service/
 
-For structured output:
-```bash
-my-solution-admin register --user alice@example.com --json
+claude (project scope, status unknown):
+  claude mcp add --transport http -s project my-solution https://your-service/
+
+agy (user config, status unknown):
+  agy mcp add my-solution https://your-service/
+
+claude.ai (manual: Settings > Connectors > Add custom connector):
+  https://your-service/
+
+Each client signs the user in with the identity provider on first use.
 ```
 
-Filter by client or scope:
-```bash
-my-solution-admin register --user alice@example.com --client claude --scope user
-```
+No command carries a credential, so the same output serves every user:
+hand it to anyone whose email is registered (or in `ADMIN_EMAILS`) and
+they sign in with their own account.
 
 ### Manual registration (if register isn't available)
 
-**stdio (local):** no token.
+**stdio (local):**
 ```bash
 claude mcp add my-solution -- my-solution-mcp stdio --user local
 agy mcp add my-solution -- my-solution-mcp stdio --user local
 ```
 
-**HTTP (remote):** the client needs the URL (root path `/`) and the
-user's token. The exact forms for Claude Code, Antigravity CLI, and
-Claude.ai are in `auth.md`.
+**HTTP (remote):** the client needs the base URL (path `/`) and nothing
+else; the forms are in `auth.md`.
 
 ## Pointing the admin CLI at a solution deployed outside mcp-app
 
 However the solution was deployed — bare `gcloud`, `docker`,
 `systemd`, a CI pipeline, anything — the admin flow is the
-same: connect the admin CLI at the URL, supply the signing
-key, and use the normal admin commands.
+same: connect the admin CLI at the URL and use the normal commands.
 
 ```bash
-my-solution-admin connect https://my-service.example.com --signing-key xxx
-my-solution-admin users add alice@example.com
+my-solution-admin connect https://my-service.example.com
 my-solution-admin probe
+my-solution-admin register
 ```
 
 The generic `mcp-app` CLI works the same way when the per-app
@@ -402,16 +420,15 @@ If the app's own admin CLI (`my-solution-admin`) isn't installed
 app's repo — use the generic `mcp-app` CLI:
 
 ```bash
-mcp-app connect https://your-service --signing-key xxx
-mcp-app users add alice@example.com --profile '{"<field>": "<value>"}'
-mcp-app users get-profile alice@example.com
+mcp-app connect https://your-service
 mcp-app probe
-mcp-app register my-solution --user alice@example.com
+mcp-app register my-solution
 ```
 
-The generic CLI works but doesn't have typed profile flags,
-model-aware `get-profile` output, or `connect local`. Always
-prefer the per-app CLI when available.
+The generic CLI has no typed profile flags, no model-aware
+`get-profile` output, and no `connect local`; its `users` group has
+the same remote sign-in limit as the per-app CLI. Always prefer the
+per-app CLI when available.
 
 ## Important notes
 
@@ -422,9 +439,9 @@ prefer the per-app CLI when available.
 - **User management is an mcp-app concern**, not a deployment
   tool concern. Admin endpoints and the CLI are part of the
   framework.
-- **Admin tokens are generated locally** using the signing
-  key — they don't pass through the deployed service.
-- **The signing key retrieval method depends on the deployment
-  tooling.** This skill can't prescribe a single command —
-  investigate the deployment configuration to trace where the
-  key lives.
+- **There is no secret to retrieve after a deploy.** `connect` needs
+  the URL only. If a task seems to need a signing key, the app is on
+  1.x (`framework-version.md`) or the task is mis-specified.
+- **Adding a user to a deployment in 2.0 is an `/admin` call with an
+  administrator's token** from the identity provider, not a CLI
+  command (`auth.md`). Say so rather than improvising.

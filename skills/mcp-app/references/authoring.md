@@ -32,17 +32,20 @@ files, no framework imports in your tool code.
   type hints become schemas.
 
 - **User identity and profile.** Identity middleware runs by default
-  in HTTP mode — validates JWTs, loads the full user record (auth +
-  profile) in one store read, sets `current_user` ContextVar. The
-  SDK reads `current_user.get()` for user identity and profile data.
+  in HTTP mode — validates the identity provider's access token, loads
+  the full user record (auth + profile) in one store read, sets
+  `current_user` ContextVar. The SDK reads `current_user.get()` for
+  user identity and profile data. Users sign in with the operator's
+  identity provider (standard MCP OAuth); the app holds no secret.
 
 - **User management out of the box.** REST admin endpoints
   (`POST /admin/users`, `GET /admin/users`,
-  `DELETE /admin/users/{email}`, `POST /admin/tokens`,
+  `DELETE /admin/users/{email}`,
   `GET /admin/users/{email}/profile`,
   `PATCH /admin/users/{email}/profile`) — user registration
-  with optional profile data, listing, revocation, token
-  issuance, and profile reads/updates with no code.
+  with optional profile data, listing, revocation, and profile
+  reads/updates with no code. Administrators are the emails in
+  `ADMIN_EMAILS`.
 
 - **Per-user data storage.** `filesystem` store (default) provides
   per-user JSON under XDG-compliant paths. Custom stores plug in
@@ -54,13 +57,13 @@ files, no framework imports in your tool code.
 
 - **One composition root.** The `App` class declares name, tools
   module, profile model, and store in one place. CLIs (`serve`,
-  `stdio`, `connect`, `users`, `tokens`, `health`, `probe`,
-  `register`) are derived automatically. The admin CLI generates
+  `stdio`, `connect`, `users`, `health`, `probe`, `register`) are
+  derived automatically. The admin CLI generates
   typed flags from the profile model.
 
 - **Free tests for auth, admin, and wiring.** `mcp_app.testing`
-  ships test modules that check auth enforcement, user admin, JWT
-  handling, CLI wiring, and tool protocol compliance against your
+  ships test modules that check auth enforcement, user admin, token
+  validation, CLI wiring, and tool protocol compliance against your
   app. Import them, provide your `App` as a fixture, get 25+ tests.
 
 - **Identity enforced by default.** Every tool is wrapped with
@@ -133,9 +136,10 @@ choose.
    — migrating to mcp-app **replaces all of it.** mcp-app's
    user profile store IS the credential management system now.
    Flag this to the user:
-   - Existing tokens become invalid after migration
+   - Existing tokens become invalid after migration; users sign
+     in with the identity provider from their MCP client instead
    - Existing users need to be re-registered in mcp-app's
-     user store via the admin CLI
+     user store (`operate.md`, `auth.md`)
    - Per-user credentials (API keys, OAuth tokens) are stored
      in mcp-app user profiles, not config files or env vars
    - **Delete the old credential code.** Any custom token
@@ -146,16 +150,15 @@ choose.
      that defeats the purpose of migrating. The SDK reads
      credentials from `current_user.get().profile`, period.
    - MCP clients (Claude.ai, Claude Code, Antigravity CLI) will
-     need new tokens and possibly updated endpoint URLs
+     need to re-add the server by URL (no token) and possibly
+     updated endpoint URLs
    - Check for existing user data on disk or in cloud storage
      that may need format conversion
-   - **If a working remote deployment exists**, connect to it
-     with the admin CLI to retrieve existing user credentials
-     for local registration. Don't ask the user to manually
-     extract tokens from browsers or config files when the
-     data is already accessible through the running service.
-     Use the deployment tool's skills to discover connection
-     details (URL, signing key) if needed.
+   - **If a working remote deployment exists**, read its user
+     list and profiles through `/admin` (with an administrator's
+     token, `auth.md`) rather than asking the user to extract
+     credentials from browsers or config files by hand. Use the
+     deployment tool's skills to discover the URL if needed.
 4. Walk through the compliance checklist (`review-checklist.md`), noting conformance
 5. Propose a migration plan in priority order
 6. Execute with the user's approval
@@ -337,10 +340,10 @@ A tool that reads a file path the *caller* supplies is safe over **stdio**
 privilege escalation — but is an **arbitrary server-side file read over
 HTTP**, where the deployed server is multi-tenant and reachable by untrusted
 callers. With the public source + a known data-volume layout, a caller can
-name `/proc/self/environ` (process env, including the signing key) or another
-user's data file, have the server read it, and exfiltrate it (e.g. by
-attaching it to a record they control). That is **cross-tenant secret
-disclosure / full auth bypass.**
+name `/proc/self/environ` (the process env, with whatever credentials the
+SDK holds) or another user's data file, have the server read it, and
+exfiltrate it (e.g. by attaching it to a record they control). That is
+**cross-tenant disclosure.**
 
 Rules for any tool that ingests a file:
 
@@ -566,17 +569,18 @@ app = App(
 Rules:
 
 - **The framework does not authenticate these routes.** Unlike the
-  MCP endpoint and `/admin` (JWT-gated), `extra_routes` are mounted
+  MCP endpoint and `/admin` (token-gated), `extra_routes` are mounted
   un-wrapped — each route owns its own auth, like the public
   `/health` route. This is deliberate: an out-of-band fetch usually
-  carries no agent JWT (the JWT lives in the MCP client's transport
-  config, not in the agent's hands), so the URL itself must be the
-  credential. The canonical pattern is a **self-authorizing signed
-  URL**: an MCP tool mints a short-lived URL signed with the
-  deployment's `SIGNING_KEY` (read from the env, same key the
-  framework uses for JWTs), the agent fetches it with a plain
-  `curl`/GET, and the route handler verifies the signature before
-  streaming. No agent-held credential, bounded blast radius.
+  carries no access token (the token lives in the MCP client, not in
+  the agent's hands), so the URL itself must be the credential. The
+  canonical pattern is a **self-authorizing signed URL**: an MCP tool
+  mints a short-lived URL signed with a secret the app owns (mcp-app
+  holds none to lend it; a per-app env var, or a key generated at
+  startup if URLs are short-lived and the service runs one instance),
+  the agent fetches it with a plain `curl`/GET, and the route handler
+  verifies the signature before streaming. No agent-held credential,
+  bounded blast radius.
 - **Routing precedence:** routes mount after `/health` and `/admin`,
   before the MCP catch-all at `/`. They take precedence over MCP but
   cannot shadow the framework's own endpoints.

@@ -1,92 +1,54 @@
-"""OAuth resource-server mode: issuer-signed tokens, metadata, 401/403 semantics.
+"""The HTTP identity layer: issuer-signed tokens, discovery, 401/403 semantics.
 
-Runs the full ASGI stack in-process with a generated RSA key standing in
-for the authorization server's signing key. No network, no real issuer.
+Runs the full ASGI stack in-process against the stand-in issuer from
+``mcp_app.testing.issuer``. No network, no real identity provider.
 """
 
-import asyncio
 import json
-import os
 from datetime import datetime, timedelta, timezone
 
 import httpx
 import jwt as pyjwt
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from jwt.algorithms import RSAAlgorithm
 
 from mcp_app.app import App
-from mcp_app.auth import OAuthResourceServer, OIDCTokenVerifier
+from mcp_app.auth import (
+    OAuthResourceServer,
+    OIDCTokenVerifier,
+    admin_emails,
+    request_base_url,
+)
 from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
 from mcp_app.models import UserAuthRecord
+from mcp_app.testing.issuer import TestIssuer
 
-ISSUER = "https://issuer.test/"
-AUDIENCE = "https://mcp.test/"
-RESOURCE = "https://mcp.test/"
-KID = "key-1"
+from .conftest import OPERATOR
 
-
-def _keypair(kid=KID):
-    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pem = private.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption(),
-    )
-    jwk = json.loads(RSAAlgorithm.to_jwk(private.public_key()))
-    jwk.update({"kid": kid, "alg": "RS256", "use": "sig"})
-    return pem, jwk
+BASE = "https://mcp.test"          # what the test client types
+AUD = "https://mcp.test/"          # what the server derives, and tokens must carry
+MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
 
 
 @pytest.fixture(scope="module")
-def keys():
-    pem, jwk = _keypair()
-    return {"pem": pem, "jwks": {"keys": [jwk]}}
-
-
-def _token(pem, kid=KID, **overrides):
-    now = datetime.now(timezone.utc)
-    claims = {
-        "iss": ISSUER,
-        "aud": [AUDIENCE, f"{ISSUER}userinfo"],
-        "sub": "google-oauth2|12345",
-        "iat": now,
-        "exp": now + timedelta(minutes=10),
-        "email": "alice@example.com",
-    }
-    claims.update(overrides)
-    claims = {k: v for k, v in claims.items() if v is not None}
-    return pyjwt.encode(claims, pem, algorithm="RS256", headers={"kid": kid})
+def mcp_issuer():
+    return TestIssuer(audience=AUD)
 
 
 @pytest.fixture
-def env(tmp_path, monkeypatch):
-    monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
-    # Admin endpoints still use the shared secret in this phase.
-    monkeypatch.setenv("SIGNING_KEY", "unit-test-admin-key-32-chars-long!!")
-    for var in ("AUTH_ISSUER", "AUTH_AUDIENCE", "MCP_RESOURCE_URL"):
-        monkeypatch.delenv(var, raising=False)
-    return tmp_path
-
-
-@pytest.fixture
-def app(env, keys):
+def app(auth_env, mcp_issuer):
     from fixture_app import tools
 
-    return App(
-        name="oauth-test",
-        tools_module=tools,
-        auth=OAuthResourceServer(
-            issuer=ISSUER, audience=AUDIENCE, resource_url=RESOURCE, jwks=keys["jwks"]
-        ),
-    )
+    return App(name="oauth-test", tools_module=tools, auth=mcp_issuer.config)
 
 
 @pytest.fixture
 def client(app):
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://mcp.test")
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE)
+
+
+def _bearer(token):
+    return {**MCP_HEADERS, "Authorization": f"Bearer {token}"}
 
 
 async def _register(email="alice@example.com"):
@@ -101,9 +63,6 @@ def _rpc(method, params=None, request_id=1):
     if params is not None:
         body["params"] = params
     return body
-
-
-MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
 
 
 class _mcp_running:
@@ -125,19 +84,26 @@ class _mcp_running:
 
 
 @pytest.mark.asyncio
-async def test_protected_resource_metadata_is_public(client):
+async def test_protected_resource_metadata_reflects_the_url_the_caller_used(client, mcp_issuer):
     resp = await client.get("/.well-known/oauth-protected-resource")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["resource"] == RESOURCE
-    assert body["authorization_servers"] == [ISSUER]
+    assert body["resource"] == AUD
+    assert body["authorization_servers"] == [mcp_issuer.issuer]
     assert "header" in body["bearer_methods_supported"]
 
 
 @pytest.mark.asyncio
+async def test_metadata_follows_host_header(app):
+    """Two hostnames for one service each see themselves as the resource."""
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://alias.test")
+    resp = await client.get("/.well-known/oauth-protected-resource")
+    assert resp.json()["resource"] == "https://alias.test/"
+
+
+@pytest.mark.asyncio
 async def test_health_needs_no_token(client):
-    resp = await client.get("/health")
-    assert resp.status_code == 200
+    assert (await client.get("/health")).status_code == 200
 
 
 # -- 401: no identity established -------------------------------------------
@@ -155,28 +121,27 @@ async def test_missing_token_gets_challenge_pointing_at_metadata(client):
 
 
 @pytest.mark.asyncio
-async def test_query_token_is_not_accepted(client, keys):
+async def test_query_token_is_not_accepted(client, mcp_issuer):
     await _register()
-    resp = await client.post(f"/?token={_token(keys['pem'])}", json=_rpc("tools/list"), headers=MCP_HEADERS)
+    token = mcp_issuer.token("alice@example.com")
+    resp = await client.post(f"/?token={token}", json=_rpc("tools/list"), headers=MCP_HEADERS)
     assert resp.status_code == 401
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "overrides",
+    "kwargs",
     [
-        {"aud": "https://other.test/"},
+        {"audience": "https://other.test/"},
         {"iss": "https://other-issuer.test/"},
-        {"exp": datetime.now(timezone.utc) - timedelta(minutes=1)},
+        {"expired": True},
     ],
     ids=["wrong-audience", "wrong-issuer", "expired"],
 )
-async def test_bad_claims_are_401(client, keys, overrides):
+async def test_bad_claims_are_401(client, mcp_issuer, kwargs):
     await _register()
     resp = await client.post(
-        "/",
-        json=_rpc("tools/list"),
-        headers={**MCP_HEADERS, "Authorization": f"Bearer {_token(keys['pem'], **overrides)}"},
+        "/", json=_rpc("tools/list"), headers=_bearer(mcp_issuer.token("alice@example.com", **kwargs))
     )
     assert resp.status_code == 401
     assert "resource_metadata=" in resp.headers["www-authenticate"]
@@ -184,43 +149,44 @@ async def test_bad_claims_are_401(client, keys, overrides):
 
 @pytest.mark.asyncio
 async def test_token_signed_by_unknown_key_is_401(client):
-    other_pem, _ = _keypair(kid="rogue")
+    rogue = TestIssuer(audience=AUD, kid="rogue")
     resp = await client.post(
-        "/",
-        json=_rpc("tools/list"),
-        headers={**MCP_HEADERS, "Authorization": f"Bearer {_token(other_pem, kid='rogue')}"},
+        "/", json=_rpc("tools/list"), headers=_bearer(rogue.token("alice@example.com"))
     )
     assert resp.status_code == 401
 
 
 @pytest.mark.asyncio
 async def test_garbage_token_is_401(client):
-    resp = await client.post(
-        "/", json=_rpc("tools/list"), headers={**MCP_HEADERS, "Authorization": "Bearer not.a.jwt"}
-    )
+    resp = await client.post("/", json=_rpc("tools/list"), headers=_bearer("not.a.jwt"))
     assert resp.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_token_without_email_claim_is_401_and_says_so(client, keys):
-    resp = await client.post(
-        "/",
-        json=_rpc("tools/list"),
-        headers={**MCP_HEADERS, "Authorization": f"Bearer {_token(keys['pem'], email=None)}"},
-    )
+async def test_token_without_email_claim_is_401_and_says_so(client, mcp_issuer):
+    resp = await client.post("/", json=_rpc("tools/list"), headers=_bearer(mcp_issuer.token(None)))
     assert resp.status_code == 401
     assert "'email' claim" in resp.json()["error_description"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_shared_secret_token_is_401(client):
+    legacy = pyjwt.encode(
+        {"sub": "alice@example.com", "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
+        "some-old-signing-key-32-chars-long!!",
+        algorithm="HS256",
+    )
+    resp = await client.post("/", json=_rpc("tools/list"), headers=_bearer(legacy))
+    assert resp.status_code == 401
 
 
 # -- 403: identity established, not admitted ---------------------------------
 
 
 @pytest.mark.asyncio
-async def test_unregistered_email_is_403_without_challenge(client, keys):
+async def test_unregistered_email_is_403_without_challenge(client, mcp_issuer):
     resp = await client.post(
-        "/",
-        json=_rpc("tools/list"),
-        headers={**MCP_HEADERS, "Authorization": f"Bearer {_token(keys['pem'], email='nobody@example.com')}"},
+        "/", json=_rpc("tools/list"), headers=_bearer(mcp_issuer.token("nobody@example.com"))
     )
     assert resp.status_code == 403
     assert "www-authenticate" not in resp.headers
@@ -231,9 +197,9 @@ async def test_unregistered_email_is_403_without_challenge(client, keys):
 
 
 @pytest.mark.asyncio
-async def test_registered_user_lists_and_calls_tools_as_themselves(app, client, keys):
+async def test_registered_user_lists_and_calls_tools_as_themselves(app, client, mcp_issuer):
     await _register("alice@example.com")
-    headers = {**MCP_HEADERS, "Authorization": f"Bearer {_token(keys['pem'])}"}
+    headers = _bearer(mcp_issuer.token("alice@example.com"))
 
     async with _mcp_running(app, client):
         listed = await client.post("/", json=_rpc("tools/list"), headers=headers)
@@ -251,83 +217,128 @@ async def test_registered_user_lists_and_calls_tools_as_themselves(app, client, 
 
 
 @pytest.mark.asyncio
-async def test_email_claim_is_matched_case_insensitively(app, client, keys):
+async def test_email_claim_is_matched_case_insensitively(app, client, mcp_issuer):
     await _register("alice@example.com")
     async with _mcp_running(app, client):
         resp = await client.post(
-            "/",
-            json=_rpc("tools/list"),
-            headers={**MCP_HEADERS, "Authorization": f"Bearer {_token(keys['pem'], email='Alice@Example.com')}"},
+            "/", json=_rpc("tools/list"), headers=_bearer(mcp_issuer.token("Alice@Example.com"))
         )
     assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_custom_email_claim_name(env, keys):
+async def test_admin_email_is_admitted_as_a_user_on_first_sign_in(app, client, mcp_issuer):
+    """ADMIN_EMAILS bootstraps a fresh deployment: no `users add` for the operator."""
+    async with _mcp_running(app, client):
+        resp = await client.post("/", json=_rpc("tools/list"), headers=_bearer(mcp_issuer.token(OPERATOR)))
+    assert resp.status_code == 200
+    store = DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test"))
+    assert (await store.get(OPERATOR)) is not None
+
+
+@pytest.mark.asyncio
+async def test_custom_email_claim_name(auth_env):
     from fixture_app import tools
 
-    app = App(
-        name="oauth-test",
-        tools_module=tools,
-        auth=OAuthResourceServer(
-            issuer=ISSUER,
-            audience=AUDIENCE,
-            resource_url=RESOURCE,
-            email_claim="https://example.com/email",
-            jwks=keys["jwks"],
-        ),
-    )
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://mcp.test")
+    namespaced = TestIssuer(audience=AUD, email_claim="https://example.com/email")
+    app = App(name="oauth-test", tools_module=tools, auth=namespaced.config)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE)
     await _register("alice@example.com")
-    token = _token(keys["pem"], email=None, **{"https://example.com/email": "alice@example.com"})
     async with _mcp_running(app, client):
         resp = await client.post(
-            "/", json=_rpc("tools/list"), headers={**MCP_HEADERS, "Authorization": f"Bearer {token}"}
+            "/", json=_rpc("tools/list"), headers=_bearer(namespaced.token("alice@example.com"))
         )
     assert resp.status_code == 200
 
 
-# -- configuration from the environment ---------------------------------------
+# -- the admin surface -------------------------------------------------------
 
 
-def test_from_env_is_none_when_unset(env):
-    assert OAuthResourceServer.from_env() is None
+@pytest.mark.asyncio
+async def test_admin_token_reaches_admin_endpoints(client, mcp_issuer):
+    headers = _bearer(mcp_issuer.token(OPERATOR))
+    created = await client.post("/admin/users", json={"email": "alice@example.com"}, headers=headers)
+    assert created.status_code == 200
+    assert created.json() == {"email": "alice@example.com", "registered": True}
+    listed = await client.get("/admin/users", headers=headers)
+    assert [u["email"] for u in listed.json()] == ["alice@example.com"]
 
 
-def test_from_env_reads_all_fields(env, monkeypatch):
-    monkeypatch.setenv("AUTH_ISSUER", ISSUER)
-    monkeypatch.setenv("AUTH_AUDIENCE", AUDIENCE)
-    monkeypatch.setenv("MCP_RESOURCE_URL", RESOURCE)
+@pytest.mark.asyncio
+async def test_non_admin_is_forbidden_on_admin_endpoints(client, mcp_issuer):
+    await _register("alice@example.com")
+    assert (await client.get("/admin/users", headers=_bearer(mcp_issuer.token("alice@example.com")))).status_code == 403
+    assert (await client.get("/admin/users")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_tokens_endpoint_does_not_exist(client, mcp_issuer):
+    resp = await client.post("/admin/tokens", json={"email": "x"}, headers=_bearer(mcp_issuer.token(OPERATOR)))
+    assert resp.status_code == 404
+
+
+# -- configuration -----------------------------------------------------------
+
+
+def test_from_env_requires_the_issuer(auth_env):
+    with pytest.raises(RuntimeError, match="AUTH_ISSUER"):
+        OAuthResourceServer.from_env()
+
+
+def test_from_env_reads_optional_fields(auth_env, monkeypatch):
+    monkeypatch.setenv("AUTH_ISSUER", "https://issuer.test/")
+    monkeypatch.setenv("AUTH_AUDIENCE", "https://pinned.test/")
     monkeypatch.setenv("AUTH_EMAIL_CLAIM", "https://example.com/email")
     monkeypatch.setenv("AUTH_JWKS_URI", "https://issuer.test/keys")
-    cfg = OAuthResourceServer.from_env()
-    assert cfg == OAuthResourceServer(
-        issuer=ISSUER,
-        audience=AUDIENCE,
-        resource_url=RESOURCE,
+    assert OAuthResourceServer.from_env() == OAuthResourceServer(
+        issuer="https://issuer.test/",
         email_claim="https://example.com/email",
+        audience="https://pinned.test/",
         jwks_uri="https://issuer.test/keys",
     )
 
 
-def test_from_env_partial_config_is_an_error(env, monkeypatch):
-    monkeypatch.setenv("AUTH_ISSUER", ISSUER)
-    with pytest.raises(RuntimeError, match="AUTH_AUDIENCE, MCP_RESOURCE_URL"):
-        OAuthResourceServer.from_env()
+def test_from_env_minimal(auth_env, monkeypatch):
+    monkeypatch.setenv("AUTH_ISSUER", "https://issuer.test/")
+    cfg = OAuthResourceServer.from_env()
+    assert cfg.issuer == "https://issuer.test/"
+    assert cfg.audience is None and cfg.email_claim == "email" and cfg.jwks_uri is None
+    assert cfg.audience_for("https://mcp.test/") == "https://mcp.test/"
 
 
-def test_app_selects_oauth_mode_from_env(env, monkeypatch, keys):
-    """AUTH_ISSUER in the environment switches the default mode without code."""
+def test_admin_emails_parsing(monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAILS", " A@x.io ,,b@y.io,")
+    assert admin_emails() == frozenset({"a@x.io", "b@y.io"})
+    monkeypatch.delenv("ADMIN_EMAILS")
+    assert admin_emails() == frozenset()
+
+
+def test_request_base_url_uses_host_and_scheme_and_ignores_forwarded_host():
+    scope = {
+        "scheme": "https",
+        "headers": [(b"x-forwarded-host", b"evil.test"), (b"host", b"mcp.example.com")],
+    }
+    assert request_base_url(scope) == "https://mcp.example.com/"
+    assert request_base_url({"scheme": "http", "headers": [(b"host", b"localhost:8080")]}) == "http://localhost:8080/"
+    assert request_base_url({"scheme": "http", "headers": [], "server": ("127.0.0.1", 9000)}) == "http://127.0.0.1:9000/"
+
+
+@pytest.mark.asyncio
+async def test_audience_override_pins_what_tokens_must_carry(auth_env):
+    """With AUTH_AUDIENCE set, the Host no longer decides; the pinned value does."""
     from fixture_app import tools
-    from mcp_app.auth import SharedSecretJWT
 
-    app = App(name="oauth-test", tools_module=tools)
-    assert isinstance(app._resolve_auth(), SharedSecretJWT)
-
-    monkeypatch.setenv("AUTH_ISSUER", ISSUER)
-    monkeypatch.setenv("AUTH_AUDIENCE", AUDIENCE)
-    monkeypatch.setenv("MCP_RESOURCE_URL", RESOURCE)
-    assert isinstance(app._resolve_auth(), OAuthResourceServer)
+    pinned = TestIssuer(audience="https://pinned.test/")
+    config = OAuthResourceServer(issuer=pinned.issuer, audience="https://pinned.test/", jwks=pinned.jwks)
+    app = App(name="oauth-test", tools_module=tools, auth=config)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE)
+    async with _mcp_running(app, client):
+        ok = await client.post("/", json=_rpc("tools/list"), headers=_bearer(pinned.token(OPERATOR)))
+        bad = await client.post(
+            "/", json=_rpc("tools/list"), headers=_bearer(pinned.token(OPERATOR, audience=AUD))
+        )
+    assert ok.status_code == 200
+    assert bad.status_code == 401
 
 
 # -- key fetching: discovery and rotation --------------------------------------
@@ -352,166 +363,70 @@ def _mock_issuer(jwks_by_call: list[dict], discovery: bool = True):
     return httpx.AsyncClient(transport=httpx.MockTransport(handler)), calls
 
 
-@pytest.mark.asyncio
-async def test_jwks_uri_comes_from_openid_discovery(env, keys):
-    http, calls = _mock_issuer([keys["jwks"]])
-    verifier = OIDCTokenVerifier(
-        OAuthResourceServer(issuer=ISSUER, audience=AUDIENCE, resource_url=RESOURCE),
+def _fetching_verifier(http, **config):
+    return OIDCTokenVerifier(
+        OAuthResourceServer(issuer="https://issuer.test/", **config),
         DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test")),
         http_client=http,
     )
-    assert await verifier.verify_claims(_token(keys["pem"])) is not None
+
+
+@pytest.mark.asyncio
+async def test_jwks_uri_comes_from_openid_discovery(auth_env, mcp_issuer):
+    http, calls = _mock_issuer([mcp_issuer.jwks])
+    verifier = _fetching_verifier(http)
+    assert await verifier.verify_claims(mcp_issuer.token("a@example.com"), AUD) is not None
     assert calls == {"discovery": 1, "jwks": 1}
     # Cached: a second token does not refetch.
-    assert await verifier.verify_claims(_token(keys["pem"])) is not None
+    assert await verifier.verify_claims(mcp_issuer.token("a@example.com"), AUD) is not None
     assert calls == {"discovery": 1, "jwks": 1}
 
 
 @pytest.mark.asyncio
-async def test_discovery_failure_falls_back_to_well_known_jwks(env, keys):
-    http, calls = _mock_issuer([keys["jwks"]], discovery=False)
-    verifier = OIDCTokenVerifier(
-        OAuthResourceServer(issuer=ISSUER, audience=AUDIENCE, resource_url=RESOURCE),
-        DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test")),
-        http_client=http,
-    )
-    assert await verifier.verify_claims(_token(keys["pem"])) is not None
+async def test_discovery_failure_falls_back_to_well_known_jwks(auth_env, mcp_issuer):
+    http, calls = _mock_issuer([mcp_issuer.jwks], discovery=False)
+    verifier = _fetching_verifier(http)
+    assert await verifier.verify_claims(mcp_issuer.token("a@example.com"), AUD) is not None
     assert calls["jwks"] == 1
 
 
 @pytest.mark.asyncio
-async def test_unknown_kid_triggers_one_refetch(env, keys):
+async def test_unknown_kid_triggers_one_refetch(auth_env, mcp_issuer):
     """Issuer key rotation: a token signed with a new key is accepted after one refetch."""
-    new_pem, new_jwk = _keypair(kid="key-2")
-    rotated = {"keys": [new_jwk]}
-    http, calls = _mock_issuer([keys["jwks"], rotated])
-    verifier = OIDCTokenVerifier(
-        OAuthResourceServer(
-            issuer=ISSUER, audience=AUDIENCE, resource_url=RESOURCE, jwks_uri="https://issuer.test/keys"
-        ),
-        DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test")),
-        http_client=http,
-    )
-    assert await verifier.verify_claims(_token(keys["pem"])) is not None
+    rotated = TestIssuer(audience=AUD, kid="key-2")
+    http, calls = _mock_issuer([mcp_issuer.jwks, rotated.jwks])
+    verifier = _fetching_verifier(http, jwks_uri="https://issuer.test/keys")
+    assert await verifier.verify_claims(mcp_issuer.token("a@example.com"), AUD) is not None
     assert calls["jwks"] == 1
-    assert await verifier.verify_claims(_token(new_pem, kid="key-2")) is not None
+    assert await verifier.verify_claims(rotated.token("a@example.com"), AUD) is not None
     assert calls["jwks"] == 2
     # A kid the issuer never published costs one more fetch and is then rejected.
-    rogue_pem, _ = _keypair(kid="rogue")
-    assert await verifier.verify_claims(_token(rogue_pem, kid="rogue")) is None
+    rogue = TestIssuer(audience=AUD, kid="rogue")
+    assert await verifier.verify_claims(rogue.token("a@example.com"), AUD) is None
     assert calls["jwks"] == 3
 
 
 @pytest.mark.asyncio
-async def test_verify_token_satisfies_sdk_protocol(env, keys):
+async def test_verify_token_satisfies_sdk_protocol_with_a_pinned_audience(auth_env):
     """The verifier can also be handed to the MCP SDK as a TokenVerifier."""
     from mcp.server.auth.provider import AccessToken
 
+    pinned = TestIssuer(audience="https://pinned.test/")
     await _register("alice@example.com")
     verifier = OIDCTokenVerifier(
-        OAuthResourceServer(issuer=ISSUER, audience=AUDIENCE, resource_url=RESOURCE, jwks=keys["jwks"]),
+        OAuthResourceServer(issuer=pinned.issuer, audience="https://pinned.test/", jwks=pinned.jwks),
         DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test")),
     )
-    access = await verifier.verify_token(_token(keys["pem"]))
+    access = await verifier.verify_token(pinned.token("alice@example.com"))
     assert isinstance(access, AccessToken)
     assert access.client_id == "alice@example.com"
-    assert access.subject == "google-oauth2|12345"
-    assert await verifier.verify_token(_token(keys["pem"], email="nobody@example.com")) is None
+    assert await verifier.verify_token(pinned.token("nobody@example.com")) is None
 
 
-# -- admin surface in OAuth mode ------------------------------------------------
-
-
-@pytest.fixture
-def admin_env(env, monkeypatch):
-    monkeypatch.setenv("ADMIN_EMAILS", "Owner@Example.com, second@example.com")
-    monkeypatch.delenv("SIGNING_KEY", raising=False)  # no shared secret anywhere
-    return env
-
-
-@pytest.fixture
-def admin_app(admin_env, keys):
-    from fixture_app import tools
-
-    return App(
-        name="oauth-test",
-        tools_module=tools,
-        auth=OAuthResourceServer(
-            issuer=ISSUER, audience=AUDIENCE, resource_url=RESOURCE, jwks=keys["jwks"]
-        ),
+@pytest.mark.asyncio
+async def test_verify_token_refuses_without_a_pinned_audience(auth_env, mcp_issuer):
+    verifier = OIDCTokenVerifier(
+        mcp_issuer.config, DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test"))
     )
-
-
-@pytest.fixture
-def admin_client(admin_app):
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=admin_app), base_url="https://mcp.test")
-
-
-@pytest.mark.asyncio
-async def test_oauth_mode_starts_without_signing_key(admin_client):
-    assert (await admin_client.get("/health")).status_code == 200
-
-
-@pytest.mark.asyncio
-async def test_admin_email_token_reaches_admin_endpoints(admin_client, keys):
-    headers = {"Authorization": f"Bearer {_token(keys['pem'], email='owner@example.com')}"}
-    created = await admin_client.post("/admin/users", json={"email": "alice@example.com"}, headers=headers)
-    assert created.status_code == 200
-    assert created.json() == {"email": "alice@example.com", "registered": True}
-    listed = await admin_client.get("/admin/users", headers=headers)
-    assert listed.status_code == 200
-    assert [u["email"] for u in listed.json()] == ["alice@example.com"]
-
-
-@pytest.mark.asyncio
-async def test_non_admin_email_is_forbidden_on_admin_endpoints(admin_client, keys):
-    await _register("alice@example.com")
-    headers = {"Authorization": f"Bearer {_token(keys['pem'], email='alice@example.com')}"}
-    assert (await admin_client.get("/admin/users", headers=headers)).status_code == 403
-    assert (await admin_client.get("/admin/users")).status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_shared_secret_admin_token_is_refused_in_oauth_mode(admin_client):
-    legacy = pyjwt.encode(
-        {"sub": "admin", "scope": "admin", "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
-        "some-old-signing-key-32-chars-long!!",
-        algorithm="HS256",
-    )
-    resp = await admin_client.get("/admin/users", headers={"Authorization": f"Bearer {legacy}"})
-    assert resp.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_token_issuance_is_refused_in_oauth_mode(admin_client, keys):
-    await _register("alice@example.com")
-    headers = {"Authorization": f"Bearer {_token(keys['pem'], email='owner@example.com')}"}
-    resp = await admin_client.post("/admin/tokens", json={"email": "alice@example.com"}, headers=headers)
-    assert resp.status_code == 409
-    assert resp.json()["error"] == "tokens_not_issued_here"
-
-
-@pytest.mark.asyncio
-async def test_admin_email_is_admitted_as_a_user_on_first_sign_in(admin_app, admin_client, keys):
-    """ADMIN_EMAILS bootstraps a fresh deployment: no `users add` for the operator."""
-    headers = {**MCP_HEADERS, "Authorization": f"Bearer {_token(keys['pem'], email='owner@example.com')}"}
-    async with _mcp_running(admin_app, admin_client):
-        resp = await admin_client.post("/", json=_rpc("tools/list"), headers=headers)
-    assert resp.status_code == 200
-    store = DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test"))
-    assert (await store.get("owner@example.com")) is not None
-
-
-@pytest.mark.asyncio
-async def test_non_admin_unknown_email_is_still_403(admin_client, keys):
-    headers = {**MCP_HEADERS, "Authorization": f"Bearer {_token(keys['pem'], email='stranger@example.com')}"}
-    assert (await admin_client.post("/", json=_rpc("tools/list"), headers=headers)).status_code == 403
-
-
-def test_admin_emails_parsing(monkeypatch):
-    from mcp_app.auth import admin_emails
-
-    monkeypatch.setenv("ADMIN_EMAILS", " A@x.io ,,b@y.io,")
-    assert admin_emails() == frozenset({"a@x.io", "b@y.io"})
-    monkeypatch.delenv("ADMIN_EMAILS")
-    assert admin_emails() == frozenset()
+    with pytest.raises(RuntimeError, match="AUTH_AUDIENCE"):
+        await verifier.verify_token(mcp_issuer.token("alice@example.com"))

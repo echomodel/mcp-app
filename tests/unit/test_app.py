@@ -106,11 +106,20 @@ def test_app_without_profile(tools_module):
 
 def test_app_construction_without_env_vars(tools_module):
     """App constructs at import time; env vars only needed on first ASGI call."""
-    for var in ("SIGNING_KEY", "APP_USERS_PATH"):
+    for var in ("AUTH_ISSUER", "APP_USERS_PATH"):
         os.environ.pop(var, None)
     app = App(name="test-app", tools_module=tools_module)
     assert app.name == "test-app"
     assert app._asgi is None
+
+
+def test_http_stack_requires_an_issuer(tools_module, tmp_path, monkeypatch):
+    """Serving HTTP without AUTH_ISSUER fails loudly, naming the variable."""
+    monkeypatch.setenv("APP_USERS_PATH", str(tmp_path / "users"))
+    monkeypatch.delenv("AUTH_ISSUER", raising=False)
+    app = App(name="test-app", tools_module=tools_module)
+    with pytest.raises(RuntimeError, match="AUTH_ISSUER"):
+        app._build_asgi()
 
 
 def test_app_is_asgi_callable_via_httpx(tools_module, tmp_path):
@@ -120,7 +129,7 @@ def test_app_is_asgi_callable_via_httpx(tools_module, tmp_path):
     import httpx
 
     os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
-    os.environ["SIGNING_KEY"] = "test-key-32chars-minimum-length!!"
+    os.environ["AUTH_ISSUER"] = "https://issuer.test/"
     try:
         app = App(name="test-app", tools_module=tools_module)
 
@@ -140,7 +149,7 @@ def test_app_is_asgi_callable_via_httpx(tools_module, tmp_path):
         assert app._asgi is not None
     finally:
         del os.environ["APP_USERS_PATH"]
-        del os.environ["SIGNING_KEY"]
+        del os.environ["AUTH_ISSUER"]
 
 
 def test_extra_routes_default_is_none(tools_module):
@@ -152,14 +161,14 @@ def test_extra_routes_default_is_none(tools_module):
 def test_extra_routes_mounted_and_public(tools_module, tmp_path):
     """extra_routes are served, take precedence over the MCP catch-all,
     and are reachable WITHOUT auth — the app owns each route's auth, the
-    framework does not wrap them in JWT identity middleware."""
+    framework does not wrap them in identity middleware."""
     import asyncio
     import httpx
     from starlette.responses import JSONResponse
     from starlette.routing import Route
 
     os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
-    os.environ["SIGNING_KEY"] = "test-key-32chars-minimum-length!!"
+    os.environ["AUTH_ISSUER"] = "https://issuer.test/"
     try:
         async def custom(_request):
             return JSONResponse({"ok": True, "from": "extra"})
@@ -176,7 +185,7 @@ def test_extra_routes_mounted_and_public(tools_module, tmp_path):
                 transport=transport, base_url="http://test"
             ) as client:
                 # No Authorization header: a public, self-authorizing route.
-                # If extra_routes were wrapped in JWT middleware, or mounted
+                # If extra_routes were wrapped in identity middleware, or mounted
                 # after the "/" catch-all, this would not return our payload.
                 return await client.get("/data/ping")
 
@@ -185,7 +194,7 @@ def test_extra_routes_mounted_and_public(tools_module, tmp_path):
         assert resp.json() == {"ok": True, "from": "extra"}
     finally:
         del os.environ["APP_USERS_PATH"]
-        del os.environ["SIGNING_KEY"]
+        del os.environ["AUTH_ISSUER"]
 
 
 def test_extra_routes_do_not_shadow_health_or_admin(tools_module, tmp_path):
@@ -197,7 +206,7 @@ def test_extra_routes_do_not_shadow_health_or_admin(tools_module, tmp_path):
     from starlette.routing import Route
 
     os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
-    os.environ["SIGNING_KEY"] = "test-key-32chars-minimum-length!!"
+    os.environ["AUTH_ISSUER"] = "https://issuer.test/"
     try:
         async def shadow(_request):
             return JSONResponse({"from": "extra"})
@@ -221,13 +230,13 @@ def test_extra_routes_do_not_shadow_health_or_admin(tools_module, tmp_path):
         assert "status" in resp.json()
     finally:
         del os.environ["APP_USERS_PATH"]
-        del os.environ["SIGNING_KEY"]
+        del os.environ["AUTH_ISSUER"]
 
 
 def test_tools_registered_with_identity_enforcement(tools_module, tmp_path):
     """Every discovered tool is wrapped with identity enforcement."""
     os.environ["APP_USERS_PATH"] = str(tmp_path / "users")
-    os.environ["SIGNING_KEY"] = "test-key-32chars-minimum-length!!"
+    os.environ["AUTH_ISSUER"] = "https://issuer.test/"
     try:
         app = App(name="test-app", tools_module=tools_module)
         app._asgi = app._build_asgi()
@@ -236,4 +245,4 @@ def test_tools_registered_with_identity_enforcement(tools_module, tmp_path):
         assert "ping" in tool_names
     finally:
         del os.environ["APP_USERS_PATH"]
-        del os.environ["SIGNING_KEY"]
+        del os.environ["AUTH_ISSUER"]
