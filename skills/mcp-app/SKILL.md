@@ -131,6 +131,7 @@ Read only the reference that matches the task. All live in `references/`.
 | Check, pin, or upgrade the mcp-app version; change mcp-app in the same session | `framework-version.md` |
 | Env vars, storage, `/health`, running over HTTP, containers, deploy routes, the deploy boundary | `runtime-contract.md` |
 | Identity provider setup, `AUTH_*` and `ADMIN_EMAILS`, the 401/403 contract, how a client signs in, admin access on a deployment | `auth.md` |
+| Set up or fix an Auth0 tenant for an app with the `auth0` CLI, no dashboard clicks: tenant flags, CIMD, connections, the email Action, per-app API and third-party access, traps | `auth0.md` |
 | Connect the admin CLI, verify a deployment, add or revoke users, rotate credentials, register clients | `operate.md` |
 | Something is broken: 401/403, failed to connect, missing tools, server won't start | `troubleshooting.md` |
 | Write or review the solution's README, CONTRIBUTING, agent context files, `.gitignore` | `app-docs.md` |

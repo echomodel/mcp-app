@@ -19,11 +19,17 @@ the implementations. You want to scale impact instead of adding to
 the cognitive load needed to keep deploying and trusting you'll be
 able to come back and rotate a credential or add a user months later.
 
-mcp-app gives you:
+The MCP SDK verifies nothing and knows no users: it hands you a
+`TokenVerifier` protocol and stops at "this token is valid". mcp-app
+is the multi-user operating model on top of it, with just enough auth
+glue to turn a verified token into a user. It gives you:
 
-- **Identity enforced by default.** Standard MCP authorization runs
-  automatically: users sign in with your identity provider, and
-  tools can't execute without an established user. You can't
+- **Users, not just tokens.** Standard MCP authorization runs
+  automatically: users sign in with your identity provider, the
+  token's email becomes a user record with its own data directory
+  and typed profile, and tools can't execute without one. Who is
+  admitted (an allowlist, or anyone the issuer vouches for, up to a
+  cap) and who administers are deployment policy. You can't
   accidentally ship a wide-open service, and you hold no secret.
 - **User management built in.** Admin endpoints, CLI for local and
   remote user management, typed profile per user — identical across
@@ -204,18 +210,27 @@ Variables](#environment-variables).
 1. An API (resource) whose identifier is the server's public URL,
    exactly as users type it, trailing slash included. Refresh
    tokens ("offline access") on.
-2. Sign in with Google as the login method; password login off.
-3. Dynamic client registration enabled, or client ID metadata
-   documents supported, so MCP clients register themselves with the
-   server URL alone. `<issuer>/.well-known/oauth-authorization-server`
-   must list a `registration_endpoint` (or advertise CIMD) and
-   `S256` under `code_challenge_methods_supported`.
+2. The login method users should see (Sign in with Google is a
+   common choice); any you don't use, such as password login, off.
+3. A way for MCP clients to identify themselves with the server URL
+   alone: client ID metadata documents (CIMD) if the issuer supports
+   them, else dynamic client registration (DCR).
+   `<issuer>/.well-known/oauth-authorization-server` must advertise
+   CIMD or list a `registration_endpoint`, and list `S256` under
+   `code_challenge_methods_supported`. Prefer CIMD: with DCR every
+   fresh connection registers a new client at the issuer, which
+   clutters the tenant and runs into application caps on free plans.
 4. The user's email included in access tokens. If the issuer
    namespaces custom claims, set `AUTH_EMAIL_CLAIM` to the full claim
    name.
 5. If the issuer needs a default audience to issue JWT (not opaque)
    access tokens when a client sends `resource` rather than
    `audience`, set it to the API identifier.
+6. If the issuer treats dynamically registered or CIMD clients as
+   third-party applications that need explicit access to an API
+   (Auth0 does), grant them default user-delegated access to the API.
+   Without it sign-in fails at the issuer before any login page,
+   usually with a generic error page.
 
 The same configuration can be pinned in code. The environment
 variables exist so one build can be parameterized per deployment

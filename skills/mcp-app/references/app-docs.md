@@ -543,8 +543,7 @@ reader needs to navigate. Coherent product, not history exposé.
 <Docker example as universal illustration — or, if the repo
  is deliberately platform-coupled, the concrete deployment
  route for that platform>
-<identity provider setup: API identifier = service URL, dynamic
- client registration, email claim>
+<identity provider setup: API identifier = service URL; CIMD or dynamic client registration; email in access tokens; default audience if needed; default user-delegated access for third-party clients where the issuer requires it>
 <post-deploy: connect admin CLI (URL only), probe>
 
 ## Manage users

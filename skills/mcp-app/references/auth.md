@@ -172,20 +172,33 @@ Generic steps; provider UIs differ. Confirm each with the operator.
    exactly as users type it, trailing slash included. This is what tokens
    carry as `aud` and what mcp-app derives from `Host`. Refresh tokens
    ("offline access") on.
-2. **Sign in with Google** as the login method; password login off.
-3. **Dynamic client registration** enabled, or client ID metadata
-   documents supported, so MCP clients register with the server URL alone.
-   Confirm: `curl <issuer>/.well-known/oauth-authorization-server` must
-   list `registration_endpoint` (or advertise CIMD) and `S256` in
-   `code_challenge_methods_supported`.
+2. **The login method** users should see (Sign in with Google is a
+   common choice); unused methods such as password login off.
+3. **Client identification with the server URL alone**: client ID
+   metadata documents (CIMD) where the issuer supports them, else
+   dynamic client registration (DCR). Confirm: `curl
+   <issuer>/.well-known/oauth-authorization-server` must advertise CIMD
+   (`client_id_metadata_document_supported: true` plus `none` in
+   `token_endpoint_auth_methods_supported`, which is what Claude requires
+   to pick CIMD) or list `registration_endpoint`, and list `S256` in
+   `code_challenge_methods_supported`. Prefer CIMD: under DCR every fresh
+   connection registers a new client at the issuer, which clutters the
+   tenant and hits application caps on free plans.
 4. **The user's email in access tokens.** If the issuer namespaces custom
    claims, set `AUTH_EMAIL_CLAIM` to the full claim name.
 5. **A default audience**, if the issuer needs one to issue JWT (not
    opaque) access tokens when a client sends `resource` rather than
    `audience`: set it to the API identifier.
+6. **Default access for third-party clients.** Issuers that treat
+   dynamically registered or CIMD clients as third-party applications
+   (Auth0 does) refuse them at `/authorize` until the API grants them
+   default user-delegated access. The symptom is a generic error page from
+   the issuer before any login page; the issuer's logs say "not authorized
+   to access resource server".
 
 Then deploy with `AUTH_ISSUER` and `ADMIN_EMAILS`, run
 `my-solution-admin probe` (`operate.md`), and sign in from an MCP client.
+A worked provider, with the commands rather than the clicks: `auth0.md`.
 
 ## Putting a server into an MCP client
 
