@@ -16,6 +16,7 @@ deployment to the operator's tooling. This file is that contract.
 | `ADMIN_EMAILS` | For HTTP | No administrators; startup warns | Emails allowed on `/admin`, admitted as users on first sign-in (`auth.md`) |
 | `AUTH_ADMISSION` | No | `allowlist` | `allowlist` or `open`: whether unregistered emails are admitted on sign-in (`auth.md`) |
 | `MAX_USERS` | No | Unlimited | Cap on user records under open admission (`auth.md`) |
+| `USAGE_FLUSH_SECONDS` | No | `60` | How often tool-call counters are written to `usage/` beside the user directories (`operate.md`, usage report) |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
 | `AUTH_AUDIENCE` | No | Derived from the request `Host` | Pin the token audience for a deployment reached by address or on several hostnames (`auth.md`) |
 | `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (`auth.md`) |

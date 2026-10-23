@@ -505,6 +505,33 @@ could lose. Per-day admission limits, per-user rate limits and storage
 quotas attach to the same `Admission` value when they land; they are not
 built yet.
 
+### Admin-only tools are filtered per request, not per registration
+
+`@mcp_transport` decides once, at registration, which transport a tool
+exists on. Admin-only tools need a second, per-request decision: the
+same HTTP server must list and run `usage_report` for an `ADMIN_EMAILS`
+entry and deny its existence to everyone else. `AppServer`
+(`mcp_app/server.py`) subclasses the SDK's `MCPServer` and applies that
+rule in `list_tools` and `call_tool` by reading `current_user`, which the
+identity middleware set before the MCP layer ran. A blocked call fails as
+an unknown tool, so a hidden tool is indistinguishable from an absent
+one. Over stdio the local user is the operator and nothing is hidden.
+Per-user tool visibility for app tools (tiers, modules) would hang off
+the same hook; it is not built.
+
+### Usage counters are flushed, never written per call
+
+Tool calls are counted in memory per day, user and tool
+(`mcp_app/usage.py`) and written to `usage/YYYY-MM-DD/<instance>.json`
+beside the user directories on a timer (`USAGE_FLUSH_SECONDS`, default
+60) and at shutdown. A per-call write on an object-store mount is a
+whole-object rewrite and would double the operation cost of every tool
+call; a report that can lose the last minute on a crash is the right
+trade. One file per process means instances never contend for an object;
+the report sums every file in its window. Emails are kept in the counters
+because the report must attribute calls, and leave the server only masked.
+Over stdio each call flushes at once: one process, one user, local disk.
+
 ### Credentials are the SDK's concern, not the framework's
 
 Earlier designs had credential proxy middleware (`bearer-proxy`,

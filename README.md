@@ -337,6 +337,12 @@ The SDK reads `current_user.get().profile` for whatever it needs. The profile wa
 
 The `tools` module is imported and all public async functions (not starting with `_`) are registered as MCP tools. Function names become tool names. Docstrings become descriptions. Type hints become schemas.
 
+The framework adds one tool of its own to every app, `usage_report`,
+which is **admin-only**: over HTTP it is neither listed in `tools/list`
+nor callable unless the signed-in email is in `ADMIN_EMAILS` (a call by
+anyone else fails as an unknown tool); over stdio the local user is the
+operator and sees it. See [Usage report](#usage-report).
+
 ### Transport-scoped tools (`@mcp_transport`)
 
 By default a tool is registered on **both** transports. To restrict one,
@@ -399,6 +405,7 @@ identity provider does.
 | `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (namespaced issuers: the full claim name) |
 | `AUTH_JWKS_URI` | No | OpenID discovery | Where to fetch the issuer's signing keys, if discovery is unavailable |
 | `REQUIRED_FS_TYPE` | No | No assertion | Opt-in startup assertion that the data dir lives on a specific filesystem type. See [Data storage](#data-storage). |
+| `USAGE_FLUSH_SECONDS` | No | `60` | How often in-memory tool-call counters are written to the data volume. See [Usage report](#usage-report). |
 
 **`AUTH_ISSUER`** must match the token's `iss` claim byte for byte; a
 missing or extra trailing slash is the usual mistake. The startup
@@ -1084,6 +1091,36 @@ Three kinds of email reach a deployment:
 
 Revoking a user deletes the record; the next request with their
 token is a `403`. Re-registering admits them again.
+
+### Usage report
+
+Every app answers `usage_report` to an administrator's MCP client:
+
+```
+usage_report(week="current")      # Monday through today, UTC
+usage_report(week="prior")        # the previous full week
+```
+
+The result is JSON: the window; users (total records, new this week,
+active this week); tool calls (total, errors, per tool); and the most
+active users with **masked** emails (`al*****@e***.com`), the tools
+each used and their call counts. Call it as often as you like: it is
+recomputed from the recorded counters every time, so a current-week
+report grows through the week and a prior-week report is stable. An
+agent on a schedule, a routine, or a person asking Claude on Monday
+morning all get the same answer. It is the one tool non-admins never
+see: it is absent from their `tools/list` and refused if called.
+
+How the numbers are kept: every tool call is counted in memory per day,
+user and tool, and the counters are written to `usage/YYYY-MM-DD/` on
+the data volume, beside the user directories, every `USAGE_FLUSH_SECONDS`
+(default 60) and at shutdown, one file per process so instances never
+contend for an object. Nothing is written per call, so an object-store
+mount is not rewritten on every request, and a crash loses at most one
+flush interval. Over stdio each call flushes immediately. A custom store
+backend without a filesystem base records nothing, and the report says
+so. User emails are in the counter files, which sit on the same volume
+as the data they describe; they leave the server only masked.
 
 ### Connect
 

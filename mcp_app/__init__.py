@@ -18,6 +18,7 @@ _store = None
 # None until a transport starts. Reported as a fact; the framework does not
 # itself enforce policy on it (see CONTRIBUTING — "reports facts, not policy").
 _transport = None
+_usage_recorder = None   # set by App on each transport; usage_report flushes it
 
 
 def get_store() -> UserDataStore:

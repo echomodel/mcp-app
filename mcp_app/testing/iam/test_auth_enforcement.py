@@ -6,6 +6,8 @@ are signed by ``mcp_app.testing.issuer.TestIssuer`` and verified by the
 app exactly as a real issuer's would be.
 """
 
+import json
+
 import httpx
 import pytest
 
@@ -203,3 +205,29 @@ async def test_open_admission_honors_max_users(app, asgi_client, oauth_env):
         assert "not accepting new users" in second.json()["error_description"]
         operator = await asgi_client.post("/", json=body, headers={**oauth_env.headers(OPERATOR), **accept})
         assert operator.status_code == 200, operator.text
+
+
+@pytest.mark.asyncio
+async def test_usage_report_is_hidden_and_blocked_for_non_admins(app, asgi_client, oauth_env, admin_headers):
+    """The framework's usage_report tool is listed and callable for an
+    ADMIN_EMAILS entry only; to anyone else it does not exist."""
+    accept = {"Accept": "application/json, text/event-stream"}
+    await asgi_client.post("/admin/users", json={"email": "alice@example.com"}, headers=admin_headers)
+    alice = {**oauth_env.headers("alice@example.com"), **accept}
+    admin = {**admin_headers, **accept}
+    listing = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+    call = {"jsonrpc": "2.0", "method": "tools/call", "id": 2,
+            "params": {"name": "usage_report", "arguments": {"week": "current"}}}
+    async with mcp_running(app, asgi_client):
+        seen_by_alice = {t["name"] for t in (await asgi_client.post("/", json=listing, headers=alice)).json()["result"]["tools"]}
+        seen_by_admin = {t["name"] for t in (await asgi_client.post("/", json=listing, headers=admin)).json()["result"]["tools"]}
+        blocked = (await asgi_client.post("/", json=call, headers=alice)).json()
+        allowed = (await asgi_client.post("/", json=call, headers=admin)).json()
+    assert "usage_report" not in seen_by_alice
+    assert "usage_report" in seen_by_admin
+    assert "error" in blocked or blocked["result"].get("isError"), blocked
+    assert not allowed["result"].get("isError"), allowed
+    report = allowed["result"].get("structuredContent") or json.loads(allowed["result"]["content"][0]["text"])
+    assert report["schema_version"] == "1"
+    assert set(report["users"]) == {"total", "new", "active"}
+    assert "@" not in json.dumps(report["top_users"]).replace("*****@", ""), "emails leave only masked"

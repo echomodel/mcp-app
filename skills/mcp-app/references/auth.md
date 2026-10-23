@@ -125,6 +125,15 @@ the record; the next request with their token is a `403`. Re-registering
 admits them again. There is nothing else to revoke on this side: the
 issuer owns the tokens.
 
+## Admin-only tools
+
+The framework registers `usage_report` on every app. Over HTTP it is
+listed and callable only for an `ADMIN_EMAILS` entry; to any other user
+it is absent from `tools/list` and a call fails as an unknown tool. Over
+stdio the local user is the operator and sees it. This is the hook
+per-user tool visibility hangs off; app tools are not filtered per user
+today.
+
 ## Admin access on a deployment
 
 `/admin` accepts the identity provider's access token for an email in

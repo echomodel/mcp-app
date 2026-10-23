@@ -167,6 +167,17 @@ For structured output (agent consumption):
 my-solution-admin probe --json
 ```
 
+### Usage report
+
+Once signed in as an administrator from an MCP client, ask for
+`usage_report` (`week="current"` or `"prior"`). It returns JSON: users
+(total, new, active), tool calls (total, errors, per tool) and the most
+active users with masked emails and per-tool counts. Recomputed on every
+call, so a scheduled agent or routine can send the same report weekly
+and re-send it on demand. Non-admins never see the tool. Counters live
+in `usage/` beside the user directories on the data volume; see
+`runtime-contract.md`.
+
 ### Sign in from a client
 
 ```bash

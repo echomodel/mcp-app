@@ -565,6 +565,10 @@ reader needs to navigate. Coherent product, not history exposé.
 <who can sign in: ADMIN_EMAILS entries and registered users; everyone else gets 403 under the default allowlist, or is admitted up to MAX_USERS when the deployment sets AUTH_ADMISSION=open — state which this app's reference deployment uses>
 <manual MCP client config as fallback>
 
+## Usage report
+
+<administrators ask the app's MCP connector for usage_report(week); JSON with users, tool calls, masked top users; non-admins never see the tool>
+
 ## Smoke-test a tool (optional)
 
 <my-app-admin safe-tool --invoke if the app declares a SafeTool, or my-app-admin tools call <name> for ad-hoc invocation>

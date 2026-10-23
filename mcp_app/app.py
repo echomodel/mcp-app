@@ -19,7 +19,6 @@ from functools import cached_property
 from types import ModuleType
 
 import click
-from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
@@ -31,7 +30,9 @@ from mcp_app.bridge import DataStoreAuthAdapter
 from mcp_app.data_store import FileSystemUserDataStore
 from mcp_app.health_check import build_health_response
 from mcp_app.middleware import OAuthMiddleware
+from mcp_app.server import AppServer
 from mcp_app.storage_check import verify_storage
+from mcp_app.usage import REPORT_TOOL_NAME, UsageRecorder, usage_report, usage_root
 
 
 STORE_ALIASES = {"filesystem": FileSystemUserDataStore}
@@ -129,6 +130,34 @@ def _require_identity(func):
         return await func(*args, **kwargs)
     return wrapper
 
+
+def _record_usage(func, recorder: UsageRecorder, flush_each_call: bool = False):
+    """Wrap a tool so every call is counted for the signed-in user."""
+    from mcp_app.context import current_user
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        ok = False
+        try:
+            result = await func(*args, **kwargs)
+            ok = True
+            return result
+        finally:
+            try:
+                recorder.record(current_user.get().email, func.__name__, ok)
+                if flush_each_call:
+                    recorder.flush()
+            except LookupError:
+                pass
+    return wrapper
+
+
+def _framework_tools() -> list:
+    """Tools every app gets from the framework, with their admin-only names."""
+    return [usage_report]
+
+
+FRAMEWORK_ADMIN_ONLY = frozenset({REPORT_TOOL_NAME})
 
 VALID_TRANSPORTS = frozenset({"stdio", "http"})
 
@@ -305,8 +334,12 @@ class App:
         auth_mode = self._resolve_auth()
         auth_mode.log_startup()
 
-        self._mcp = MCPServer(self.name)
+        recorder = UsageRecorder(usage_root(store))
+        mcp_app._usage_recorder = recorder
+        self._mcp = AppServer(self.name, admin_only=set(FRAMEWORK_ADMIN_ONLY))
         for func in _discover_tools(self._discovered_modules, "http"):
+            self._mcp.tool()(_record_usage(_require_identity(func), recorder))
+        for func in _framework_tools():
             self._mcp.tool()(_require_identity(func))
 
         auth_store = DataStoreAuthAdapter(store)
@@ -339,8 +372,12 @@ class App:
 
         @contextlib.asynccontextmanager
         async def lifespan(_):
-            async with self._mcp.session_manager.run():
-                yield
+            recorder.start()
+            try:
+                async with self._mcp.session_manager.run():
+                    yield
+            finally:
+                await recorder.stop()
 
         async def health(_):
             # Public, identity-free response. Full diagnostic detail lives
@@ -390,8 +427,13 @@ class App:
         mcp_app._store = store
         mcp_app._transport = "stdio"
 
-        mcp = MCPServer(self.name)
+        recorder = UsageRecorder(usage_root(store))
+        mcp_app._usage_recorder = recorder
+        mcp = AppServer(self.name, admin_only=set(FRAMEWORK_ADMIN_ONLY))
         for func in _discover_tools(self._discovered_modules, "stdio"):
+            # One local process, one user: flush per call so nothing waits on a timer.
+            mcp.tool()(_record_usage(_require_identity(func), recorder, flush_each_call=True))
+        for func in _framework_tools():
             mcp.tool()(_require_identity(func))
 
         adapter = DataStoreAuthAdapter(store)
