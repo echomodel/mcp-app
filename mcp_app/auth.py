@@ -29,7 +29,13 @@ import jwt as pyjwt
 from jwt import PyJWKSet
 
 from mcp_app.context import current_user, hydrate_profile
-from mcp_app.models import UserAuthRecord
+from mcp_app.models import (
+    STATUS_APPROVED,
+    STATUS_BLOCKED,
+    STATUS_PENDING,
+    UserAuthRecord,
+    UserRecord,
+)
 
 logger = logging.getLogger("mcp_app.auth")
 startup_logger = logging.getLogger("mcp_app.startup")
@@ -44,6 +50,8 @@ ENV_AUDIENCE = "AUTH_AUDIENCE"
 ENV_EMAIL_CLAIM = "AUTH_EMAIL_CLAIM"
 ENV_JWKS_URI = "AUTH_JWKS_URI"
 ENV_ADMIN_EMAILS = "ADMIN_EMAILS"
+ENV_ADMIN_CLIENT_IDS = "ADMIN_CLIENT_IDS"
+MACHINE_PREFIX = "client:"
 ENV_ADMISSION = "AUTH_ADMISSION"
 ENV_MAX_USERS = "MAX_USERS"
 
@@ -109,6 +117,26 @@ class Admission:
     def describe(self) -> str:
         cap = self.max_users if self.max_users is not None else "unlimited"
         return f"admission={self.policy} max_users={cap}"
+
+
+def admin_client_ids() -> frozenset[str]:
+    """Machine callers admitted as administrators: ``ADMIN_CLIENT_IDS``.
+
+    A client-credentials token carries no email, only the client id the
+    issuer put in ``azp`` (or ``client_id``). A listed id is admitted as
+    the principal ``client:<id>``, an administrator with no stored record,
+    so scripts and CI can call the admin tools without a browser anywhere.
+    """
+    raw = os.environ.get(ENV_ADMIN_CLIENT_IDS, "")
+    return frozenset(c.strip() for c in raw.split(",") if c.strip())
+
+
+def is_admin(email: str) -> bool:
+    """Whether a principal (an email, or ``client:<id>``) administers this deployment."""
+    email = email.lower()
+    if email.startswith(MACHINE_PREFIX):
+        return email[len(MACHINE_PREFIX):] in {c.lower() for c in admin_client_ids()}
+    return email in admin_emails()
 
 
 def request_base_url(scope: dict) -> str:
@@ -198,7 +226,7 @@ class OAuthResourceServer:
         startup_logger.info(
             f"auth issuer={self.issuer} audience={aud} "
             f"email_claim={self.email_claim} admin_emails={admins} "
-            f"{self.admission.describe()}"
+            f"admin_client_ids={len(admin_client_ids())} {self.admission.describe()}"
         )
         if admins == 0:
             startup_logger.warning(
@@ -354,10 +382,12 @@ class OIDCTokenVerifier:
         """Map a token to a user record and set ``current_user``.
 
         Returns one of:
-            ``("ok", UserRecord)`` — token valid, user registered, context set.
-            ``("unknown", email)`` — token valid, email not registered (403).
-            ``("full", email)`` — token valid, open admission, but
-            ``MAX_USERS`` records already exist (403).
+            ``("ok", UserRecord)`` — token valid, user admitted, context set.
+            ``("pending", email)`` — token valid, allowlist policy, record
+            created and waiting for an administrator (403).
+            ``("blocked", email)`` — token valid, record blocked (403).
+            ``("full", email)`` — token valid, but ``MAX_USERS`` records
+            already exist, so no record was created (403).
             ``("invalid", reason)`` — token missing, malformed, expired, wrong
             issuer or audience, or lacking the email claim (401).
         """
@@ -366,36 +396,58 @@ class OIDCTokenVerifier:
             return "invalid", "The access token is invalid or expired"
         email = self.email_of(claims)
         if email is None:
+            machine = self.machine_principal(claims)
+            if machine is not None:
+                # A listed machine client: an administrator with no record.
+                record = UserRecord(email=machine, created=None)
+                current_user.set(record)
+                return "ok", record
             return "invalid", (
                 f"The access token carries no '{self.config.email_claim}' claim; "
                 "the authorization server must include the user's email"
             )
         record = await self.auth_store.get_full(email)
         if record is None:
-            admit = email in admin_emails()
-            if not admit and self.config.admission.open:
-                # Open admission: the issuer's word is enough, up to the cap.
-                # The count is a directory listing, taken only when a new
-                # email appears, never on the hot path of a tool call.
+            if email in admin_emails():
+                # An operator named in ADMIN_EMAILS is admitted by declaration;
+                # the record is created on first sign-in so no registration
+                # is needed to bootstrap a deployment.
+                status = STATUS_APPROVED
+            else:
+                # Everyone else gets a record on first sign-in: approved under
+                # open admission, pending under the allowlist, both bounded by
+                # MAX_USERS. The count is a directory listing taken only when a
+                # new email appears, never on the hot path of a tool call.
                 cap = self.config.admission.max_users
                 if cap is not None and await self.auth_store.count() >= cap:
-                    logger.info("open admission refused %s: MAX_USERS=%d reached", email, cap)
+                    logger.info("admission refused %s: MAX_USERS=%d reached", email, cap)
                     return "full", email
-                admit = True
-            if admit:
-                # An operator named in ADMIN_EMAILS is admitted by declaration;
-                # the record is created on first sign-in so no `users add` is
-                # needed to bootstrap a deployment. Open admission reuses the
-                # same path.
-                await self.auth_store.save(
-                    UserAuthRecord(email=email, created=datetime.now(timezone.utc))
-                )
-                record = await self.auth_store.get_full(email)
+                status = STATUS_APPROVED if self.config.admission.open else STATUS_PENDING
+            await self.auth_store.save(
+                UserAuthRecord(email=email, created=datetime.now(timezone.utc), status=status)
+            )
+            record = await self.auth_store.get_full(email)
         if record is None:
             return "unknown", email
+        if record.status == STATUS_BLOCKED:
+            return "blocked", email
+        if record.status == STATUS_PENDING:
+            if email in admin_emails():
+                # Declared administrators are never left pending.
+                record.status = STATUS_APPROVED
+                await self.auth_store.save(UserAuthRecord(**record.model_dump(exclude={"profile"})))
+            else:
+                return "pending", email
         record.profile = hydrate_profile(record.profile)
         current_user.set(record)
         return "ok", record
+
+    def machine_principal(self, claims: dict) -> str | None:
+        """``client:<id>`` for a listed machine client's token, else ``None``."""
+        client_id = claims.get("azp") or claims.get("client_id")
+        if isinstance(client_id, str) and client_id in admin_client_ids():
+            return f"{MACHINE_PREFIX}{client_id}"
+        return None
 
     async def verify_token(self, token: str):
         """MCP SDK ``TokenVerifier`` protocol: ``AccessToken`` or ``None``.
@@ -444,4 +496,7 @@ class OAuthAdminAuth:
         if not claims:
             return False
         email = self.verifier.email_of(claims)
-        return email is not None and email in admin_emails()
+        if email is None:
+            machine = self.verifier.machine_principal(claims)
+            return machine is not None
+        return is_admin(email)

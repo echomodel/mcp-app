@@ -550,7 +550,7 @@ reader needs to navigate. Coherent product, not history exposé.
 
 <users add with this app's actual flags>
 <users get-profile, users update-profile, users list, users revoke>
-<how a user is added to a deployment today: /admin with an administrator's token>
+<how a user is managed on a deployment: the admin tools users_list, user_register, user_block from an administrator's MCP client or a script with a machine token>
 <where to obtain backend credentials if API-proxy, or what each preference field controls>
 <forward anchor-link to "Connect end users" — admin's next step once a user is added>
 
@@ -561,7 +561,7 @@ reader needs to navigate. Coherent product, not history exposé.
 ## Connect end users
 
 <register command — the per-client setup commands the end user runs; run register and document what it actually prints, don't paraphrase>
-<who can sign in: ADMIN_EMAILS entries and registered users; everyone else gets 403 under the default allowlist, or is admitted up to MAX_USERS when the deployment sets AUTH_ADMISSION=open — state which this app's reference deployment uses>
+<who can sign in: ADMIN_EMAILS entries; approved users; under the default allowlist a stranger's sign-in is parked pending for an administrator to approve with user_register; under AUTH_ADMISSION=open anyone is approved up to MAX_USERS — state which this app's reference deployment uses; user_block refuses>
 <manual MCP client config as fallback>
 
 ## Usage report

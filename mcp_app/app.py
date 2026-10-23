@@ -32,6 +32,7 @@ from mcp_app.health_check import build_health_response
 from mcp_app.middleware import OAuthMiddleware
 from mcp_app.server import AppServer
 from mcp_app.storage_check import verify_storage
+from mcp_app.management import user_block, user_register, users_list
 from mcp_app.usage import REPORT_TOOL_NAME, UsageRecorder, usage_report, usage_root
 
 
@@ -153,11 +154,11 @@ def _record_usage(func, recorder: UsageRecorder, flush_each_call: bool = False):
 
 
 def _framework_tools() -> list:
-    """Tools every app gets from the framework, with their admin-only names."""
-    return [usage_report]
+    """Tools every app gets from the framework; all of them are admin-only."""
+    return [users_list, user_register, user_block, usage_report]
 
 
-FRAMEWORK_ADMIN_ONLY = frozenset({REPORT_TOOL_NAME})
+FRAMEWORK_ADMIN_ONLY = frozenset({"users_list", "user_register", "user_block", REPORT_TOOL_NAME})
 
 VALID_TRANSPORTS = frozenset({"stdio", "http"})
 

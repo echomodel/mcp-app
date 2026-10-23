@@ -488,6 +488,78 @@ Separate fleets eliminate this entirely. Each fleet is self-contained. Want
 local docker instances? Put them in a `local` fleet. Shared Cloud Run
 services? They're in `work`. They never mix, merge, or conflict.
 
+### The admin surface: tools, with a thin CLI to come
+
+Administration (list, register, block users; the usage report) is a set
+of admin-only MCP tools (`mcp_app/management.py`, `mcp_app/usage.py`),
+not a REST API and not CLI code. The reasons, in order of weight:
+
+- **One implementation, every client.** A tool is reachable by the
+  person's own MCP client, by a script with the SDK client, by a
+  scheduled agent, and by a CLI, all through `tools/call` with the same
+  token. A REST surface beside it would be a second implementation of the
+  same four operations with its own auth and its own tests.
+- **Identity is already solved there.** The client a person administers
+  from is signed in. A CLI that administers must obtain its own token,
+  which is the problem the 1.x CLI never had and the 2.0 CLI cannot do.
+- **Machines fit the same model.** `ADMIN_CLIENT_IDS` admits a
+  client-credentials token (no email claim; `azp` or `client_id` lists
+  the client) as the principal `client:<id>`, an administrator with no
+  record. Scripts and CI mint such a token with one request to the
+  issuer and call the tools; nothing needs a browser.
+- **Secrets stay out of it.** Backend credentials are not tool
+  arguments, so they never pass through a chat transcript or a shell
+  history; they enter through the user-authenticated surface.
+
+User records carry a status (`models.USER_STATUSES`): `approved`,
+`pending` (signed in under the allowlist, awaiting an administrator),
+`blocked`. Refusing someone is a status change, never a deletion,
+because under open admission a deleted record would be recreated on the
+next sign-in; and `user_register` is one verb for approve-in-advance,
+approve-pending and unblock, so an invited person's first sign-in
+succeeds and an uninvited one waits in the list. `MAX_USERS` bounds
+records that sign-in creates, in either status.
+
+**What this commits the codebase to.** The `/admin` REST routes and the
+`RemoteAuthAdapter` client are deprecated as of 2.0: they stay because
+the per-app admin CLI still talks to them, and `DELETE /admin/users`
+now blocks rather than deletes so the two surfaces agree. They go when
+the CLI moves. No new capability is added to the REST surface.
+
+**The CLI that will replace the remote half of today's.** Not built;
+everything it depends on is. It is a thin client over the admin tools,
+in the shape of `gcloud` or `gh`:
+
+1. **Login by discovery, no provider code.** From the server URL it
+   reads `/.well-known/oauth-protected-resource` for the issuer (RFC
+   9728), then the issuer's metadata (RFC 8414) for endpoints and
+   capabilities. Default flow: authorization code with PKCE and a
+   loopback redirect (RFC 8252), registering itself through dynamic
+   client registration (RFC 7591) or presenting a published client
+   metadata document, exactly as the Claude clients do. `--no-browser`:
+   the device grant (RFC 8628) with a client id the operator registered
+   once at the issuer, because some issuers (Auth0 among them) do not let
+   dynamically registered clients use that grant. Refresh tokens stored
+   per app in the config dir; the standard refresh grant renews them.
+2. **Machine mode** for scripts: a token from the environment, or a
+   client id and secret the CLI exchanges itself, so the same commands
+   run in CI; the server admits it through `ADMIN_CLIENT_IDS`.
+3. **Commands are the tools**: `users list`, `users register <email>`,
+   `users block <email>`, `usage [--week prior]`, each a `tools/call`,
+   output the tool's JSON or a table of it. `probe` and the issuer
+   `verify` stay identity-free and keep working before any user exists.
+4. **Removed with it**: the `/admin` REST routes, `RemoteAuthAdapter`,
+   the `admin-tools` MCP server, `connect`'s saved target (the URL is an
+   argument), `register` (the URL is the registration), and the local
+   `users` commands (the tools work over stdio, where the local user is
+   the operator). The framework's IAM tests move from CLI subprocess
+   checks to tool calls.
+
+Everything in 1 to 3 is discovery plus published RFCs; the only
+provider-specific knowledge is which grant a given issuer allows for
+which kind of client, and that lives in the provider references of the
+skill, not in code.
+
 ### Admission is a policy switch, not an app concern
 
 Who gets a user record on first sign-in is deployment policy, so it is
@@ -501,9 +573,11 @@ cap: `ADMIN_EMAILS` is a declaration, not a request, and a cap must never
 lock the operator out. The cap counts records with one directory listing
 (`UserAuthStore.count`), taken only when an unknown email appears, so it
 costs nothing on the tool-call path and needs no state that a restart
-could lose. Per-day admission limits, per-user rate limits and storage
-quotas attach to the same `Admission` value when they land; they are not
-built yet.
+could lose. Under the allowlist a stranger's first sign-in creates a `pending`
+record (bounded by the cap) so an administrator approves from a list
+rather than typing an email. Per-day admission limits, per-user rate
+limits and storage quotas attach to the same `Admission` value when
+they land; they are not built yet.
 
 ### Admin-only tools are filtered per request, not per registration
 
@@ -512,10 +586,11 @@ exists on. Admin-only tools need a second, per-request decision: the
 same HTTP server must list and run `usage_report` for an `ADMIN_EMAILS`
 entry and deny its existence to everyone else. `AppServer`
 (`mcp_app/server.py`) subclasses the SDK's `MCPServer` and applies that
-rule in `list_tools` and `call_tool` by reading `current_user`, which the
-identity middleware set before the MCP layer ran. A blocked call fails as
-an unknown tool, so a hidden tool is indistinguishable from an absent
-one. Over stdio the local user is the operator and nothing is hidden.
+rule in `list_tools` and `call_tool` by asking `auth.is_admin` about
+`current_user`, which the identity middleware set before the MCP layer
+ran. A blocked call fails as an unknown tool, so a hidden tool is
+indistinguishable from an absent one. Over stdio the local user is the
+operator and nothing is hidden. All four framework tools are admin-only.
 Per-user tool visibility for app tools (tiers, modules) would hang off
 the same hook; it is not built.
 

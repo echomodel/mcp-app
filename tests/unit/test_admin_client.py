@@ -83,12 +83,14 @@ async def test_save_idempotent(adapter):
 
 
 @pytest.mark.asyncio
-async def test_delete_marks_revoked(adapter):
+async def test_delete_marks_blocked(adapter):
+    """Remote revoke keeps the record and marks it blocked: deleting it
+    would let open admission recreate it on the next sign-in."""
     await adapter.save(UserAuthRecord(email="alice@test.com", created=datetime.now(timezone.utc)))
     await adapter.delete("alice@test.com")
     users = await adapter.list()
     assert len(users) == 1
-    assert users[0].revoke_after is not None
+    assert users[0].status == "blocked"
 
 
 @pytest.mark.asyncio

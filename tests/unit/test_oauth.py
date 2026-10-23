@@ -518,10 +518,15 @@ async def test_admins_are_admitted_past_the_cap(auth_env, mcp_issuer):
 
 
 @pytest.mark.asyncio
-async def test_allowlist_mode_still_refuses_unknown_emails(auth_env, mcp_issuer):
+async def test_allowlist_mode_parks_unknown_emails_as_pending(auth_env, mcp_issuer):
+    """Allowlist: a stranger who signs in gets a pending record and a 403
+    that says so, and an administrator can see them in the list."""
     from fixture_app import tools
 
     app = App(name="oauth-test", tools_module=tools, auth=mcp_issuer.config)
     resp = await _client(app).post("/", json=TOOLS_LIST, headers=_bearer(mcp_issuer.token("stranger@example.com")))
     assert resp.status_code == 403
-    assert "not registered" in resp.json()["error_description"]
+    assert "awaiting approval" in resp.json()["error_description"]
+    store = DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test"))
+    record = await store.get("stranger@example.com")
+    assert record is not None and record.status == "pending"

@@ -414,7 +414,8 @@ identity provider does.
 | `AUTH_ISSUER` | For HTTP | Startup fails | The authorization server's issuer identifier, exactly as in the token's `iss` claim (trailing slash included if the issuer uses one). See [Authentication](#authentication). |
 | `ADMIN_EMAILS` | For HTTP | No administrators; startup warns | Comma-separated emails that may call `/admin`. Each is also admitted as a user on first sign-in. |
 | `AUTH_ADMISSION` | No | `allowlist` | Who else is admitted on first sign-in: `allowlist` (only registered users) or `open` (any email the issuer vouches for). See [Who can sign in](#who-can-sign-in). |
-| `MAX_USERS` | No | Unlimited | With `open` admission, the number of user records past which new emails get `403`. Administrators are never counted out. |
+| `MAX_USERS` | No | Unlimited | The number of user records (approved or pending) past which a new email gets `403` and no record. Administrators are never counted out. |
+| `ADMIN_CLIENT_IDS` | No | None | Comma-separated client ids whose client-credentials tokens (no email claim) are admitted as administrators, as the principal `client:<id>`. For scripts and CI. See [Administration](#administration). |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
 | `AUTH_AUDIENCE` | No | Derived from the request `Host` | Value the token's `aud` claim must contain. Set only for a deployment reached by address rather than hostname, or one answering on several hostnames. |
 | `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (namespaced issuers: the full claim name) |
@@ -651,9 +652,50 @@ my-app-mcp stdio --user alice@example.com
 The CLI loads the user record from the store and sets `current_user`.
 Refuses to start without `--user`.
 
-## Admin Endpoints
+## Administration
 
-REST admin endpoints are mounted at `/admin` in HTTP mode:
+Administration is a set of MCP tools every app exposes, admin-only:
+over HTTP they are listed and callable only for an administrator, an
+`ADMIN_EMAILS` entry or an `ADMIN_CLIENT_IDS` machine client; to
+anyone else they are absent from `tools/list` and a call fails as an
+unknown tool. Over stdio the local user is the operator.
+
+| Tool | Does |
+|---|---|
+| `users_list()` | Every record with its status (`pending`, `approved`, `blocked`), creation time, counts per status, the `MAX_USERS` cap in force |
+| `user_register(email)` | Approve: creates an approved record for an email never seen (their first sign-in then succeeds), approves a pending one, or lifts a block. Idempotent |
+| `user_block(email)` | Refuse from now on whatever the admission policy; creates a blocked record for an email never seen. Idempotent; `user_register` lifts it |
+| `usage_report(week)` | The weekly usage report, see [Usage report](#usage-report) |
+
+Because they are ordinary tools, every standard MCP client drives them
+with the same token it already holds: a person in Claude, a script using
+the SDK client, a scheduled agent. Backend credentials for an API-proxy
+app's profile are deliberately not a tool argument: a secret should not
+pass through a chat or an operator's shell.
+
+**From a script or CI, with no browser:** register a machine client at
+the issuer with a client-credentials grant for the API, list its client
+id in `ADMIN_CLIENT_IDS`, and call the tools over JSON-RPC:
+
+```python
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+async with streamablehttp_client("https://your-service/", headers={"Authorization": f"Bearer {token}"}) as (r, w, _):
+    async with ClientSession(r, w) as s:
+        await s.initialize()
+        await s.call_tool("user_register", {"email": "alice@example.com"})
+```
+
+`token` comes from the issuer's token endpoint with `grant_type=client_credentials`
+and the API as audience. The principal `client:<id>` administers but has
+no record and no data directory.
+
+### Admin REST endpoints (deprecated)
+
+The REST surface at `/admin` predates the tools and does the same work;
+it remains in 2.0 for the admin CLI and will be removed once the CLI
+calls the tools instead (see CONTRIBUTING, "The admin surface").
 
 - `POST /admin/users` — register user (with optional profile); returns
   `{"email", "registered": true}`
@@ -667,21 +709,12 @@ REST admin endpoints are mounted at `/admin` in HTTP mode:
   free bytes, mount source) that the public `/health` intentionally
   omits. See [Health endpoint](#health-endpoint).
 
-They accept the identity provider's access token for an email listed
-in `ADMIN_EMAILS` — the same kind of token an MCP client obtains for
-that user. mcp-app issues no tokens of its own, so there is no token
-endpoint: the authorization server issues every token, and
-`DELETE /admin/users/{email}` is the access control on this side.
-
-**Reaching `/admin` on a deployment.** The admin CLI runs every
-`users` command against the local store (`connect local`). Against a
-deployment it does not yet sign in, so remote `users`, `tools` and
-`safe-tool` commands exit with a message saying so; a signed-in
-remote mode is planned. Until then an administrator drives `/admin`
-on a deployment with their own access token from the identity
-provider (`curl -H "Authorization: Bearer <token>"`), and the common
-case — the operator is the first user — needs no admin call at all,
-because an `ADMIN_EMAILS` entry is admitted on first sign-in.
+They accept an administrator's token, the same kind an MCP client
+obtains. `DELETE /admin/users/{email}` marks the record blocked rather
+than deleting it, like `user_block`. The admin CLI's remote `users`,
+`tools` and `safe-tool` commands cannot sign in and exit with a message
+saying so; use the admin tools from an MCP client, or the CLI's local
+mode (`connect local`) for a local store.
 
 ### Safe tool
 
@@ -1093,19 +1126,25 @@ They sign in the same way, with their own account.
 
 ### Who can sign in
 
-Three kinds of email reach a deployment:
+Every user record carries a status, and the status decides:
 
-- **Administrators** (`ADMIN_EMAILS`): admitted on first sign-in,
-  record created automatically, may call `/admin`.
-- **Registered users**: anyone an administrator has registered via
-  `POST /admin/users`, with an optional profile.
-- **Everyone else**: depends on `AUTH_ADMISSION`. Under `allowlist`
-  (default) the identity provider signs them in and mcp-app answers
-  `403`. Under `open` they are admitted and registered on their first
-  request, until `MAX_USERS` records exist.
+- **Administrators** (`ADMIN_EMAILS`): approved on first sign-in,
+  record created automatically, may use the admin tools.
+- **`approved`**: runs tools. Created by `user_register` (before or
+  after the person's first sign-in), or on first sign-in under
+  `AUTH_ADMISSION=open`.
+- **`pending`**: signed in under the `allowlist` policy without being
+  registered first. The record exists, the request got `403`
+  "awaiting approval", and the person appears first in `users_list`
+  for an administrator to approve with `user_register`.
+- **`blocked`**: refused with `403` whatever the policy, by
+  `user_block`. The record and the user's data stay; `user_register`
+  lifts it. Records are never deleted to refuse someone, because under
+  open admission the next sign-in would recreate them.
 
-Revoking a user deletes the record; the next request with their
-token is a `403`. Re-registering admits them again.
+`MAX_USERS` bounds the records that sign-in may create, approved or
+pending; past it a new email gets `403` "not accepting new users" and
+no record. A record from 1.x, with no status field, counts as approved.
 
 ### Usage report
 

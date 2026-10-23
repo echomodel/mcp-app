@@ -108,61 +108,52 @@ refreshes it itself; no token is ever pasted anywhere.
 
 ## Who can sign in
 
-- **Administrators** (`ADMIN_EMAILS`): admitted on first sign-in, may call
-  `/admin`.
-- **Registered users**: anyone an administrator registered via
-  `POST /admin/users`, with an optional profile.
-- **Everyone else**: under `AUTH_ADMISSION=allowlist` (default) the issuer
-  signs them in and mcp-app answers `403`; under `open` they are admitted
-  and registered on their first request, until `MAX_USERS` records exist.
-  Open admission suits data-owning apps; an API-proxy app's users still
-  need a profile before their first tool call, so until users can supply
-  their own backend credentials, open admission only creates empty records.
-  Recommend `MAX_USERS` whenever admission is open.
+Every user record carries a status, and the status decides:
 
-Revoking a user (`DELETE /admin/users/{email}`, `users revoke`) deletes
-the record; the next request with their token is a `403`. Re-registering
-admits them again. There is nothing else to revoke on this side: the
-issuer owns the tokens.
+- **Administrators** (`ADMIN_EMAILS`, or a machine client in
+  `ADMIN_CLIENT_IDS`): approved on first sign-in, may use the admin tools.
+- **`approved`**: runs tools. Created by `user_register` (before or after
+  the person's first sign-in) or on first sign-in under `AUTH_ADMISSION=open`.
+- **`pending`**: signed in under `allowlist` without being registered. The
+  request got `403` "awaiting approval"; the person appears first in
+  `users_list` for an administrator to approve with `user_register`.
+- **`blocked`**: `403` whatever the policy, set by `user_block`; the record
+  and data stay; `user_register` lifts it. Refusal is a status change, never
+  a deletion, because open admission would recreate a deleted record.
 
-## Admin-only tools
+`MAX_USERS` bounds the records sign-in may create, approved or pending.
+Open admission suits data-owning apps; an API-proxy app's users still need
+a profile before their first tool call, so until users can supply their
+own backend credentials, open admission only creates empty records.
+Recommend `MAX_USERS` whenever admission is open.
 
-The framework registers `usage_report` on every app. Over HTTP it is
-listed and callable only for an `ADMIN_EMAILS` entry; to any other user
-it is absent from `tools/list` and a call fails as an unknown tool. Over
-stdio the local user is the operator and sees it. This is the hook
-per-user tool visibility hangs off; app tools are not filtered per user
-today.
+## Admin tools
+
+The framework registers four admin-only tools on every app: `users_list`,
+`user_register(email)`, `user_block(email)` and `usage_report(week)`.
+Over HTTP they are listed and callable only for an administrator; to any
+other user they are absent from `tools/list` and a call fails as an
+unknown tool. Over stdio the local user is the operator and sees them.
+Backend credentials are never a tool argument.
+
+An administrator drives them from their own MCP client (Claude, with the
+token it already holds) or from a script: register a machine client at the
+issuer with a client-credentials grant for the API, list its id in
+`ADMIN_CLIENT_IDS`, mint a token with `grant_type=client_credentials`, and
+call the tools over JSON-RPC with the SDK client or curl. The principal is
+`client:<id>`, an administrator with no record. This is the hook per-user
+tool visibility hangs off; app tools are not filtered per user today.
 
 ## Admin access on a deployment
 
-`/admin` accepts the identity provider's access token for an email in
-`ADMIN_EMAILS` — the same kind of token an MCP client obtains. The admin
-CLI drives `/admin` only against the local store (`connect local`); its
-remote mode supports `health`, `probe` and `register` and does not yet
-sign in, so remote `users`, `tools` and `safe-tool` exit with a message
-saying so. A device-code `login` is planned; the token slot
-(`access_token` in `setup.json`) already exists and nothing writes it.
-
-Until then, on a deployment:
-
-- The common case needs no admin call: the operator is in
-  `ADMIN_EMAILS` and is admitted on first sign-in from their MCP client.
-- To register another user, call `POST /admin/users` with an
-  administrator's access token obtained from the identity provider
-  (most providers can issue a test token for a registered API from
-  their dashboard):
-  ```bash
-  curl -X POST https://your-service/admin/users \
-    -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"email": "alice@example.com", "profile": {"<field>": "<value>"}}'
-  ```
-- The MCP admin tools server (`mcp-app admin-tools`) takes the same
-  `access_token` argument for its user-management tools.
-
-Say this plainly when an operator asks to add a user to a deployment; do
-not invent a `tokens` command or a signing key.
+Use the admin tools above. The REST surface at `/admin` and the admin
+CLI's remote `users`, `tools` and `safe-tool` commands are deprecated in
+2.0: the CLI cannot sign in, and the REST routes duplicate the tools. A
+thin CLI over the tools with a standard discovery-driven login is
+designed in mcp-app's CONTRIBUTING ("The admin surface") and not yet
+built; say so rather than improvising a login. The common case needs no
+admin call at all: an `ADMIN_EMAILS` entry is admitted on first sign-in
+from their MCP client.
 
 ## Setting up the identity provider
 

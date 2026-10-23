@@ -28,7 +28,7 @@ class AppServer(MCPServer):
 
     def caller_is_admin(self) -> bool:
         import mcp_app
-        from mcp_app.auth import admin_emails
+        from mcp_app.auth import is_admin
         from mcp_app.context import current_user
 
         if mcp_app.get_transport() == "stdio":
@@ -37,7 +37,7 @@ class AppServer(MCPServer):
             user = current_user.get()
         except LookupError:
             return False
-        return user.email.lower() in admin_emails()
+        return is_admin(user.email)
 
     async def list_tools(self):
         tools = await super().list_tools()

@@ -208,9 +208,10 @@ async def test_open_admission_honors_max_users(app, asgi_client, oauth_env):
 
 
 @pytest.mark.asyncio
-async def test_usage_report_is_hidden_and_blocked_for_non_admins(app, asgi_client, oauth_env, admin_headers):
-    """The framework's usage_report tool is listed and callable for an
-    ADMIN_EMAILS entry only; to anyone else it does not exist."""
+async def test_admin_tools_are_hidden_and_blocked_for_non_admins(app, asgi_client, oauth_env, admin_headers):
+    """The framework's admin tools (users_list, user_register, user_block,
+    usage_report) are listed and callable for an ADMIN_EMAILS entry only;
+    to anyone else they do not exist."""
     accept = {"Accept": "application/json, text/event-stream"}
     await asgi_client.post("/admin/users", json={"email": "alice@example.com"}, headers=admin_headers)
     alice = {**oauth_env.headers("alice@example.com"), **accept}
@@ -223,8 +224,9 @@ async def test_usage_report_is_hidden_and_blocked_for_non_admins(app, asgi_clien
         seen_by_admin = {t["name"] for t in (await asgi_client.post("/", json=listing, headers=admin)).json()["result"]["tools"]}
         blocked = (await asgi_client.post("/", json=call, headers=alice)).json()
         allowed = (await asgi_client.post("/", json=call, headers=admin)).json()
-    assert "usage_report" not in seen_by_alice
-    assert "usage_report" in seen_by_admin
+    admin_only = {"usage_report", "users_list", "user_register", "user_block"}
+    assert not (admin_only & seen_by_alice), "admin tools are invisible to non-admins"
+    assert admin_only <= seen_by_admin
     assert "error" in blocked or blocked["result"].get("isError"), blocked
     assert not allowed["result"].get("isError"), allowed
     report = allowed["result"].get("structuredContent") or json.loads(allowed["result"]["content"][0]["text"])

@@ -14,7 +14,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from mcp_app.health_check import build_admin_health_detail
-from mcp_app.models import UserAuthRecord
+from mcp_app.models import STATUS_BLOCKED, UserAuthRecord
 from mcp_app.store import UserAuthStore
 
 SAFE_TOOL_SCHEMA_VERSION = "1"
@@ -76,9 +76,9 @@ def create_admin_app(store: UserAuthStore, *, admin_auth, safe_tool=None) -> Sta
         if not user:
             return JSONResponse({"error": "Not found"}, status_code=404)
 
-        user.revoke_after = datetime.now(timezone.utc).timestamp()
+        user.status = STATUS_BLOCKED
         await store.save(user)
-        return JSONResponse({"revoked": email})
+        return JSONResponse({"revoked": email, "status": STATUS_BLOCKED})
 
     async def update_profile(request: Request) -> JSONResponse:
         """Merge fields into a user's profile."""

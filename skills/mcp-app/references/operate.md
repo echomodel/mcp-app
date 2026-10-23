@@ -296,73 +296,38 @@ curl -X POST https://your-service/ \
 
 ## Manage users
 
-### Register a new user
+On a deployment, user management is four admin-only MCP tools called from
+the administrator's own MCP client (or from a script with a machine
+token; `auth.md`, admin tools):
 
-```bash
-# Data-owning app — no profile needed
-my-solution-admin users add alice@example.com
-
-# API-proxy app — profile via typed flags (field names are solution-specific; see `users add --help`)
-my-solution-admin users add alice@example.com --<field> <value>
+```
+users_list()                     # every record with status: pending first, then approved, blocked
+user_register("alice@example.com")   # approve: in advance, or a pending sign-in, or lift a block
+user_block("bob@example.com")        # refuse from now on; data stays; user_register lifts it
+usage_report(week="prior")           # the weekly report
 ```
 
-`users add` rejects existing users, so an API-proxy user's stored
-credentials can't be overwritten by accident. If the user already
-exists, use `update-profile` instead. `users add` prints nothing to
-hand the user: they sign in from their MCP client with their own
-account (`auth.md`). Against a remote in 2.0, register through
-`POST /admin/users` with an administrator's token instead (`auth.md`).
+`user_register` prints nothing to hand the user: they sign in from
+their MCP client with their own account. Under `AUTH_ADMISSION=open`
+nobody needs registering at all. Backend credentials for an API-proxy
+app's profile are not tool arguments; until the user-authenticated
+credential surface exists, set them against the local store below or
+through the deprecated REST routes with an administrator's token.
 
-To discover what profile fields the app expects, check the
-`--help` output — field names and descriptions are generated
-from the app's Pydantic profile model:
+The admin CLI's local mode still works against a local store:
 
 ```bash
-my-solution-admin users add --help
-```
-
-### Read the current profile
-
-```bash
+my-solution-admin connect local
+my-solution-admin users add alice@example.com [--<field> <value>]
 my-solution-admin users get-profile alice@example.com
-my-solution-admin users get-profile alice@example.com --json
-```
-
-When the solution has a registered profile model, the per-app
-CLI shows every declared field with its current value or
-`(missing)`, and tags any extra stored keys as
-`(not in profile model)`. This is how you confirm what's
-actually stored before rotating, or verify a credential rotation
-landed.
-
-### Update credentials
-
-Field names are solution-specific — discover them from
-`my-solution-admin users update-profile --help`, which lists
-valid keys generated from the solution's profile model.
-
-```bash
-# Typed key (expand=True apps) — key is validated, tab-completable
-my-solution-admin users update-profile alice@example.com <field> <new-value>
-
-# JSON merge (expand=False apps)
-my-solution-admin users update-profile alice@example.com '{"<field>": "<new-value>"}'
-```
-
-Use this to rotate backend credentials, refresh OAuth tokens, or
-change any per-user setting without re-registering the user. Only the specified field is changed — other profile
-fields are preserved.
-
-### Other user operations
-
-```bash
-# List all users
+my-solution-admin users update-profile alice@example.com <field> <value>
 my-solution-admin users list
-
-# Revoke a user (their next request is a 403; `users add` re-admits)
-my-solution-admin users revoke alice@example.com
 ```
 
+Field names for API-proxy apps come from `users add --help`, generated
+from the app's profile model. Against a remote the CLI's `users`,
+`tools` and `safe-tool` commands exit with a not-signed-in message; the
+tools above are the route (`auth.md`).
 
 ## Register MCP clients
 
