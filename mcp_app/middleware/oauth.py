@@ -10,7 +10,10 @@ Sits outside the MCP ASGI app and owns the ``current_user`` ContextVar.
   starts the OAuth flow on its own.
 * A valid token whose email is not registered gets ``403``: the identity
   is established, the service just isn't open to it. Re-authenticating
-  would not help, so no challenge is sent.
+  would not help, so no challenge is sent. Under open admission
+  (``AUTH_ADMISSION=open``) a new email is registered on its first
+  request instead, until ``MAX_USERS`` records exist; past the cap the
+  answer is the same ``403`` with a different description.
 
 Public paths pass through untouched: ``/health`` and anything under
 ``/.well-known/`` (the metadata document must be readable before the
@@ -46,14 +49,16 @@ class OAuthMiddleware:
         )
         if status == "invalid":
             return await self._challenge(send, base_url, value)
-        if status == "unknown":
+        if status in ("unknown", "full"):
+            description = (
+                f"{value} is not registered with this service"
+                if status == "unknown"
+                else "This service is not accepting new users"
+            )
             return await _send_json(
                 send,
                 403,
-                {
-                    "error": "forbidden",
-                    "error_description": f"{value} is not registered with this service",
-                },
+                {"error": "forbidden", "error_description": description},
             )
         await self.app(scope, receive, send)
 

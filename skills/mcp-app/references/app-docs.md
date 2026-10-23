@@ -562,7 +562,7 @@ reader needs to navigate. Coherent product, not history exposé.
 ## Connect end users
 
 <register command — the per-client setup commands the end user runs; run register and document what it actually prints, don't paraphrase>
-<who can sign in: ADMIN_EMAILS entries and registered users; everyone else gets 403>
+<who can sign in: ADMIN_EMAILS entries and registered users; everyone else gets 403 under the default allowlist, or is admitted up to MAX_USERS when the deployment sets AUTH_ADMISSION=open — state which this app's reference deployment uses>
 <manual MCP client config as fallback>
 
 ## Smoke-test a tool (optional)

@@ -488,6 +488,23 @@ Separate fleets eliminate this entirely. Each fleet is self-contained. Want
 local docker instances? Put them in a `local` fleet. Shared Cloud Run
 services? They're in `work`. They never mix, merge, or conflict.
 
+### Admission is a policy switch, not an app concern
+
+Who gets a user record on first sign-in is deployment policy, so it is
+an environment setting (`AUTH_ADMISSION`, `MAX_USERS`) read into one
+`Admission` value on the auth configuration, not a branch apps write.
+The default stays `allowlist` because a fresh deployment must not be
+open by accident. `open` reuses the exact code path that bootstraps an
+`ADMIN_EMAILS` entry, so there is one way a record is created on sign-in.
+Administrators are admitted under either policy and are exempt from the
+cap: `ADMIN_EMAILS` is a declaration, not a request, and a cap must never
+lock the operator out. The cap counts records with one directory listing
+(`UserAuthStore.count`), taken only when an unknown email appears, so it
+costs nothing on the tool-call path and needs no state that a restart
+could lose. Per-day admission limits, per-user rate limits and storage
+quotas attach to the same `Admission` value when they land; they are not
+built yet.
+
 ### Credentials are the SDK's concern, not the framework's
 
 Earlier designs had credential proxy middleware (`bearer-proxy`,
@@ -901,6 +918,7 @@ The full production stack:
 - MCPServer wrapped with identity middleware (runs by default)
 - Admin REST endpoints at `/admin`
 - `current_user` set by verifier: full user record (auth + profile) in one store read
+- Admission by `ADMIN_EMAILS` plus `AUTH_ADMISSION` (`allowlist` default, or `open` capped by `MAX_USERS`)
 - uvicorn runs internally (port 8080 by default)
 - Store wired and accessible via `get_store()`
 

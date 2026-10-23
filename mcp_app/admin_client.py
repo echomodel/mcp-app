@@ -147,6 +147,9 @@ class RemoteAuthAdapter:
             profile=profile,
         )
 
+    async def count(self) -> int:
+        return len(await self.list())
+
     async def list(self) -> list[UserAuthRecord]:
         resp = await self._http.get(
             f"{self.base_url}/admin/users",

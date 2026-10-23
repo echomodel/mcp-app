@@ -175,13 +175,18 @@ The outcomes a client sees:
 - **Valid token, email in `ADMIN_EMAILS`** → admitted even if not yet
   registered; the record is created on first sign-in. This is how a
   fresh deployment bootstraps without `users add`.
+- **Valid token, unknown email, `AUTH_ADMISSION=open`** → admitted the
+  same way, until `MAX_USERS` records exist; past the cap, `403` with
+  "not accepting new users". See [Who can sign in](#who-can-sign-in).
 
 The token is read from the `Authorization` header only. The
 `?token=` query form is not accepted.
 
-**Configuration is the issuer and the administrators**, nothing
-more. `AUTH_ISSUER` names the authorization server; `ADMIN_EMAILS`
-names who may call `/admin`. Everything about *this* server — its
+**Configuration is the issuer, the administrators, and the admission
+policy**, nothing more. `AUTH_ISSUER` names the authorization server;
+`ADMIN_EMAILS` names who may call `/admin`; `AUTH_ADMISSION` says
+whether anyone else needs to be registered first (`allowlist`, the
+default) or is admitted on sign-in (`open`). Everything about *this* server — its
 public URL, and therefore the audience a token must carry and the
 `resource` it advertises — is derived from each request's `Host`
 header. On any front door that routes by hostname (Cloud Run, a
@@ -387,6 +392,8 @@ identity provider does.
 |----------|----------|------------|---------|
 | `AUTH_ISSUER` | For HTTP | Startup fails | The authorization server's issuer identifier, exactly as in the token's `iss` claim (trailing slash included if the issuer uses one). See [Authentication](#authentication). |
 | `ADMIN_EMAILS` | For HTTP | No administrators; startup warns | Comma-separated emails that may call `/admin`. Each is also admitted as a user on first sign-in. |
+| `AUTH_ADMISSION` | No | `allowlist` | Who else is admitted on first sign-in: `allowlist` (only registered users) or `open` (any email the issuer vouches for). See [Who can sign in](#who-can-sign-in). |
+| `MAX_USERS` | No | Unlimited | With `open` admission, the number of user records past which new emails get `403`. Administrators are never counted out. |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory |
 | `AUTH_AUDIENCE` | No | Derived from the request `Host` | Value the token's `aud` claim must contain. Set only for a deployment reached by address rather than hostname, or one answering on several hostnames. |
 | `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email (namespaced issuers: the full claim name) |
@@ -402,6 +409,20 @@ is no promotion path, and changing the set is a redeploy. Compared
 lower-cased. With it empty the server starts and serves registered
 users, but nobody can call `/admin` or bootstrap the first user, so
 startup logs a warning.
+
+**`AUTH_ADMISSION`** and **`MAX_USERS`** are the admission policy. The
+default, `allowlist`, admits administrators and whoever an
+administrator registered; everyone else the issuer signs in gets
+`403`. `open` admits any email the issuer vouches for and creates its
+record on the first request, which is the right setting for a
+data-owning app that anyone with an account may use. `MAX_USERS` caps
+it: once that many records exist, a new email gets `403` with "not
+accepting new users" and no record. The count is one directory
+listing, taken only when a new email appears. Set the cap whenever
+admission is open; without it startup logs a warning. An API-proxy
+app gains nothing from open admission until its users can supply their
+own backend credentials, because an admitted user with no profile has
+nothing to call with.
 
 **`AUTH_AUDIENCE`** — by default the audience a token must carry is
 the URL the request arrived at, which is the API identifier the
@@ -1056,8 +1077,10 @@ Three kinds of email reach a deployment:
   record created automatically, may call `/admin`.
 - **Registered users**: anyone an administrator has registered via
   `POST /admin/users`, with an optional profile.
-- **Everyone else**: the identity provider signs them in, mcp-app
-  answers `403`.
+- **Everyone else**: depends on `AUTH_ADMISSION`. Under `allowlist`
+  (default) the identity provider signs them in and mcp-app answers
+  `403`. Under `open` they are admitted and registered on their first
+  request, until `MAX_USERS` records exist.
 
 Revoking a user deletes the record; the next request with their
 token is a `403`. Re-registering admits them again.

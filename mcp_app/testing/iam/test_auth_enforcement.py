@@ -9,6 +9,7 @@ app exactly as a real issuer's would be.
 import httpx
 import pytest
 
+from mcp_app.auth import ADMISSION_OPEN, Admission
 from mcp_app.testing.fixtures import OPERATOR, issuer, mcp_running, oauth_env  # noqa: F401
 
 
@@ -168,3 +169,37 @@ async def test_admin_safe_tool_envelope_versioned(asgi_client, admin_headers):
 async def test_admin_safe_tool_requires_admin(asgi_client):
     resp = await asgi_client.get("/admin/safe-tool")
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_open_admission_admits_any_verified_email(app, asgi_client, oauth_env, admin_headers):
+    """AUTH_ADMISSION=open: the issuer's word is enough; a new email gets a
+    record on its first request and can list tools. It is still not an
+    administrator."""
+    oauth_env.configure(app, admission=Admission(policy=ADMISSION_OPEN))
+    headers = {**oauth_env.headers("newcomer@example.com"),
+               "Accept": "application/json, text/event-stream"}
+    body = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+    async with mcp_running(app, asgi_client):
+        resp = await asgi_client.post("/", json=body, headers=headers)
+    assert resp.status_code == 200, resp.text
+    listed = await asgi_client.get("/admin/users", headers=admin_headers)
+    assert "newcomer@example.com" in [u["email"] for u in listed.json()]
+    denied = await asgi_client.get("/admin/users", headers=oauth_env.headers("newcomer@example.com"))
+    assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_open_admission_honors_max_users(app, asgi_client, oauth_env):
+    """MAX_USERS caps open admission; administrators are never counted out."""
+    oauth_env.configure(app, admission=Admission(policy=ADMISSION_OPEN, max_users=1))
+    body = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+    accept = {"Accept": "application/json, text/event-stream"}
+    async with mcp_running(app, asgi_client):
+        first = await asgi_client.post("/", json=body, headers={**oauth_env.headers("first@example.com"), **accept})
+        assert first.status_code == 200, first.text
+        second = await asgi_client.post("/", json=body, headers={**oauth_env.headers("second@example.com"), **accept})
+        assert second.status_code == 403
+        assert "not accepting new users" in second.json()["error_description"]
+        operator = await asgi_client.post("/", json=body, headers={**oauth_env.headers(OPERATOR), **accept})
+        assert operator.status_code == 200, operator.text

@@ -13,6 +13,8 @@ import pytest
 
 from mcp_app.app import App
 from mcp_app.auth import (
+    ADMISSION_OPEN,
+    Admission,
     OAuthResourceServer,
     OIDCTokenVerifier,
     admin_emails,
@@ -430,3 +432,96 @@ async def test_verify_token_refuses_without_a_pinned_audience(auth_env, mcp_issu
     )
     with pytest.raises(RuntimeError, match="AUTH_AUDIENCE"):
         await verifier.verify_token(mcp_issuer.token("alice@example.com"))
+
+
+# -- admission policy -----------------------------------------------------
+
+from mcp_app.testing.fixtures import mcp_running  # noqa: E402
+
+TOOLS_LIST = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+
+
+def _open_app(mcp_issuer, max_users=None):
+    from fixture_app import tools
+
+    config = OAuthResourceServer(
+        issuer=mcp_issuer.issuer, jwks=mcp_issuer.jwks,
+        admission=Admission(policy=ADMISSION_OPEN, max_users=max_users),
+    )
+    return App(name="oauth-test", tools_module=tools, auth=config)
+
+
+def _client(app):
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE)
+
+
+def test_allowlist_is_the_default_policy(auth_env):
+    assert Admission().policy == "allowlist"
+    assert Admission.from_env() == Admission()
+
+
+def test_admission_from_env_parses_policy_and_cap(auth_env, monkeypatch):
+    monkeypatch.setenv("AUTH_ADMISSION", "Open")
+    monkeypatch.setenv("MAX_USERS", "25")
+    assert Admission.from_env() == Admission(policy="open", max_users=25)
+
+
+@pytest.mark.parametrize("var,value", [("AUTH_ADMISSION", "anyone"), ("MAX_USERS", "many"), ("MAX_USERS", "0")])
+def test_admission_from_env_rejects_bad_values(auth_env, monkeypatch, var, value):
+    monkeypatch.setenv(var, value)
+    with pytest.raises(ValueError):
+        Admission.from_env()
+
+
+@pytest.mark.asyncio
+async def test_open_admission_registers_a_new_email_on_first_request(auth_env, mcp_issuer):
+    """Open mode: any email the issuer vouches for gets a record and runs,
+    and is still not an administrator."""
+    app = _open_app(mcp_issuer)
+    client = _client(app)
+    newcomer = _bearer(mcp_issuer.token("newcomer@example.com"))
+    async with mcp_running(app, client):
+        resp = await client.post("/", json=TOOLS_LIST, headers=newcomer)
+    assert resp.status_code == 200, resp.text
+    assert isinstance(resp.json()["result"]["tools"], list)
+    store = DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test"))
+    assert await store.get("newcomer@example.com") is not None
+    assert (await client.get("/admin/users", headers=newcomer)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_open_admission_stops_at_max_users(auth_env, mcp_issuer):
+    """The cap counts every record; past it a new email gets 403 and no record."""
+    await _register("first@example.com")
+    app = _open_app(mcp_issuer, max_users=1)
+    client = _client(app)
+    resp = await client.post("/", json=TOOLS_LIST, headers=_bearer(mcp_issuer.token("second@example.com")))
+    assert resp.status_code == 403
+    assert "not accepting new users" in resp.json()["error_description"]
+    assert "www-authenticate" not in resp.headers
+    store = DataStoreAuthAdapter(FileSystemUserDataStore(app_name="oauth-test"))
+    assert await store.get("second@example.com") is None
+    async with mcp_running(app, client):
+        existing = await client.post("/", json=TOOLS_LIST, headers=_bearer(mcp_issuer.token("first@example.com")))
+    assert existing.status_code == 200, "an existing user is unaffected by the cap"
+
+
+@pytest.mark.asyncio
+async def test_admins_are_admitted_past_the_cap(auth_env, mcp_issuer):
+    """ADMIN_EMAILS is a declaration: the cap never locks the operator out."""
+    await _register("first@example.com")
+    app = _open_app(mcp_issuer, max_users=1)
+    client = _client(app)
+    async with mcp_running(app, client):
+        resp = await client.post("/", json=TOOLS_LIST, headers=_bearer(mcp_issuer.token(OPERATOR)))
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_allowlist_mode_still_refuses_unknown_emails(auth_env, mcp_issuer):
+    from fixture_app import tools
+
+    app = App(name="oauth-test", tools_module=tools, auth=mcp_issuer.config)
+    resp = await _client(app).post("/", json=TOOLS_LIST, headers=_bearer(mcp_issuer.token("stranger@example.com")))
+    assert resp.status_code == 403
+    assert "not registered" in resp.json()["error_description"]

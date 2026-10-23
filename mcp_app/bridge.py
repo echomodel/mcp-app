@@ -43,6 +43,10 @@ class DataStoreAuthAdapter:
             return UserRecord(email=email)
         return None
 
+    async def count(self) -> int:
+        """One directory listing; no user record is opened."""
+        return len(self.store.list_users())
+
     async def list(self) -> list[UserAuthRecord]:
         results = []
         for email in self.store.list_users():

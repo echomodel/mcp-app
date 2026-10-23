@@ -44,6 +44,12 @@ ENV_AUDIENCE = "AUTH_AUDIENCE"
 ENV_EMAIL_CLAIM = "AUTH_EMAIL_CLAIM"
 ENV_JWKS_URI = "AUTH_JWKS_URI"
 ENV_ADMIN_EMAILS = "ADMIN_EMAILS"
+ENV_ADMISSION = "AUTH_ADMISSION"
+ENV_MAX_USERS = "MAX_USERS"
+
+ADMISSION_ALLOWLIST = "allowlist"
+ADMISSION_OPEN = "open"
+ADMISSION_POLICIES = (ADMISSION_ALLOWLIST, ADMISSION_OPEN)
 
 METADATA_PATH = "/.well-known/oauth-protected-resource"
 
@@ -57,6 +63,52 @@ def admin_emails() -> frozenset[str]:
     """
     raw = os.environ.get(ENV_ADMIN_EMAILS, "")
     return frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+
+
+@dataclass(frozen=True)
+class Admission:
+    """Who gets a user record on first sign-in, beyond ``ADMIN_EMAILS``.
+
+    ``allowlist`` (default): only emails an administrator registered, plus
+    the administrators themselves. Everyone else the issuer signs in gets
+    ``403``. ``open``: any email the issuer vouches for is admitted and a
+    record is created on its first request, capped by ``max_users``.
+
+    Administrators are admitted under either policy and are not subject
+    to the cap: ``ADMIN_EMAILS`` is a declaration, not a request.
+    """
+
+    policy: str = ADMISSION_ALLOWLIST
+    max_users: int | None = None
+
+    def __post_init__(self):
+        if self.policy not in ADMISSION_POLICIES:
+            raise ValueError(
+                f"{ENV_ADMISSION} must be one of {', '.join(ADMISSION_POLICIES)}; "
+                f"got {self.policy!r}"
+            )
+        if self.max_users is not None and self.max_users < 1:
+            raise ValueError(f"{ENV_MAX_USERS} must be a positive integer")
+
+    @classmethod
+    def from_env(cls) -> "Admission":
+        policy = os.environ.get(ENV_ADMISSION, "").strip().lower() or ADMISSION_ALLOWLIST
+        raw = os.environ.get(ENV_MAX_USERS, "").strip()
+        max_users: int | None = None
+        if raw:
+            try:
+                max_users = int(raw)
+            except ValueError:
+                raise ValueError(f"{ENV_MAX_USERS} must be a positive integer; got {raw!r}")
+        return cls(policy=policy, max_users=max_users)
+
+    @property
+    def open(self) -> bool:
+        return self.policy == ADMISSION_OPEN
+
+    def describe(self) -> str:
+        cap = self.max_users if self.max_users is not None else "unlimited"
+        return f"admission={self.policy} max_users={cap}"
 
 
 def request_base_url(scope: dict) -> str:
@@ -104,6 +156,9 @@ class OAuthResourceServer:
         jwks: A static JWK Set (``{"keys": [...]}``). When given, no key is
             ever fetched. For tests and air-gapped deployments; not read
             from the environment.
+        admission: Who is admitted on first sign-in beyond ``ADMIN_EMAILS``
+            (see :class:`Admission`). From ``AUTH_ADMISSION`` and
+            ``MAX_USERS``.
     """
 
     issuer: str
@@ -111,6 +166,7 @@ class OAuthResourceServer:
     audience: str | None = None
     jwks_uri: str | None = None
     jwks: dict | None = field(default=None, repr=False)
+    admission: Admission = field(default_factory=Admission)
 
     @classmethod
     def from_env(cls) -> "OAuthResourceServer":
@@ -128,6 +184,7 @@ class OAuthResourceServer:
             email_claim=os.environ.get(ENV_EMAIL_CLAIM, "").strip() or "email",
             audience=os.environ.get(ENV_AUDIENCE, "").strip() or None,
             jwks_uri=os.environ.get(ENV_JWKS_URI, "").strip() or None,
+            admission=Admission.from_env(),
         )
 
     def audience_for(self, base_url: str) -> str:
@@ -140,12 +197,18 @@ class OAuthResourceServer:
         admins = len(admin_emails())
         startup_logger.info(
             f"auth issuer={self.issuer} audience={aud} "
-            f"email_claim={self.email_claim} admin_emails={admins}"
+            f"email_claim={self.email_claim} admin_emails={admins} "
+            f"{self.admission.describe()}"
         )
         if admins == 0:
             startup_logger.warning(
                 f"{ENV_ADMIN_EMAILS} is empty: no one can call /admin or "
                 "bootstrap the first user"
+            )
+        if self.admission.open and self.admission.max_users is None:
+            startup_logger.warning(
+                f"{ENV_ADMISSION}=open with no {ENV_MAX_USERS}: any account the "
+                "issuer signs in gets a user record, without limit"
             )
 
     def protected_resource_route(self):
@@ -293,6 +356,8 @@ class OIDCTokenVerifier:
         Returns one of:
             ``("ok", UserRecord)`` — token valid, user registered, context set.
             ``("unknown", email)`` — token valid, email not registered (403).
+            ``("full", email)`` — token valid, open admission, but
+            ``MAX_USERS`` records already exist (403).
             ``("invalid", reason)`` — token missing, malformed, expired, wrong
             issuer or audience, or lacking the email claim (401).
         """
@@ -306,14 +371,26 @@ class OIDCTokenVerifier:
                 "the authorization server must include the user's email"
             )
         record = await self.auth_store.get_full(email)
-        if record is None and email in admin_emails():
-            # An operator named in ADMIN_EMAILS is admitted by declaration;
-            # the record is created on first sign-in so no `users add` is
-            # needed to bootstrap a deployment.
-            await self.auth_store.save(
-                UserAuthRecord(email=email, created=datetime.now(timezone.utc))
-            )
-            record = await self.auth_store.get_full(email)
+        if record is None:
+            admit = email in admin_emails()
+            if not admit and self.config.admission.open:
+                # Open admission: the issuer's word is enough, up to the cap.
+                # The count is a directory listing, taken only when a new
+                # email appears, never on the hot path of a tool call.
+                cap = self.config.admission.max_users
+                if cap is not None and await self.auth_store.count() >= cap:
+                    logger.info("open admission refused %s: MAX_USERS=%d reached", email, cap)
+                    return "full", email
+                admit = True
+            if admit:
+                # An operator named in ADMIN_EMAILS is admitted by declaration;
+                # the record is created on first sign-in so no `users add` is
+                # needed to bootstrap a deployment. Open admission reuses the
+                # same path.
+                await self.auth_store.save(
+                    UserAuthRecord(email=email, created=datetime.now(timezone.utc))
+                )
+                record = await self.auth_store.get_full(email)
         if record is None:
             return "unknown", email
         record.profile = hydrate_profile(record.profile)

@@ -25,11 +25,13 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import jwt as pyjwt
+from dataclasses import replace
+
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
 
-from mcp_app.auth import OAuthResourceServer
+from mcp_app.auth import Admission, OAuthResourceServer
 
 DEFAULT_ISSUER = "https://issuer.test/"
 DEFAULT_AUDIENCE = "http://test/"
@@ -62,9 +64,13 @@ class TestIssuer:
             issuer=issuer, email_claim=email_claim, jwks=self.jwks
         )
 
-    def configure(self, app) -> None:
-        """Point an ``App`` at this issuer. Resets a stack built with other auth."""
-        app.auth = self.config
+    def configure(self, app, admission: Admission | None = None) -> None:
+        """Point an ``App`` at this issuer. Resets a stack built with other auth.
+
+        ``admission`` overrides the policy (default: allowlist), the way
+        ``AUTH_ADMISSION`` / ``MAX_USERS`` would on a deployment.
+        """
+        app.auth = self.config if admission is None else replace(self.config, admission=admission)
         app._asgi = None
 
     def token(

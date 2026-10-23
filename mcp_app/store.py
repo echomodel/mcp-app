@@ -23,6 +23,10 @@ class UserAuthStore(Protocol):
         """Get full user record including profile."""
         ...
 
+    async def count(self) -> int:
+        """Number of user records. Cheap: no record is read."""
+        ...
+
     async def list(self) -> list[UserAuthRecord]:
         """List all users with auth records."""
         ...

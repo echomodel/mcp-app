@@ -35,6 +35,8 @@ overrides for unusual setups. None is a secret.
 |-----|----------|------------|---------|
 | `AUTH_ISSUER` | For HTTP | Startup fails | Issuer identifier, exactly as in the token's `iss` claim (trailing slash included if the issuer uses one) |
 | `ADMIN_EMAILS` | For HTTP | No administrators; startup warns | Comma-separated emails allowed on `/admin`; each is admitted as a user on first sign-in |
+| `AUTH_ADMISSION` | No | `allowlist` | Who else is admitted on first sign-in: `allowlist` (registered users only) or `open` (any email the issuer vouches for) |
+| `MAX_USERS` | No | Unlimited | With `open` admission, the record count past which new emails get `403`; administrators are never counted out |
 | `APP_USERS_PATH` | No | `~/.local/share/{name}/users/` | Per-user data directory (`runtime-contract.md`) |
 | `AUTH_AUDIENCE` | No | Derived from the request `Host` | Value `aud` must contain. Set only for a deployment reached by address rather than hostname, or answering on several hostnames |
 | `AUTH_EMAIL_CLAIM` | No | `email` | Claim carrying the user's email; namespaced issuers need the full name (e.g. `https://example.com/email`) |
@@ -47,7 +49,7 @@ add app-specific auth env vars on top of them.
 
 **`AUTH_ISSUER`** must match the token's `iss` byte for byte. A missing or
 extra trailing slash is the usual mistake. The startup log line
-`mcp_app.startup auth issuer=... audience=... email_claim=... admin_emails=N`
+`mcp_app.startup auth issuer=... audience=... email_claim=... admin_emails=N admission=... max_users=...`
 shows what the server is using.
 
 **`ADMIN_EMAILS`** is the whole admin model. Membership in that variable
@@ -84,6 +86,7 @@ deployment is reached by address; don't push it otherwise.
 | Valid token, email not registered | `403`, no challenge | Identity established; not admitted. Register the user; re-authenticating cannot help |
 | Valid token, registered email | Normal MCP response | `current_user` set |
 | Valid token, email in `ADMIN_EMAILS`, not registered | Normal MCP response; record created | Operator bootstrap |
+| Valid token, unknown email, `AUTH_ADMISSION=open` | Normal MCP response; record created, or `403` "not accepting new users" once `MAX_USERS` is reached | Open admission |
 | `GET /.well-known/oauth-protected-resource` | `200` `{"resource": "<base>/", "authorization_servers": [issuer], "bearer_methods_supported": ["header"]}` | Public discovery document; `resource` is the URL the request arrived at |
 | `?token=...` on any request | Ignored; `401` as above | Only the `Authorization` header is read |
 
@@ -109,7 +112,13 @@ refreshes it itself; no token is ever pasted anywhere.
   `/admin`.
 - **Registered users**: anyone an administrator registered via
   `POST /admin/users`, with an optional profile.
-- **Everyone else**: the issuer signs them in; mcp-app answers `403`.
+- **Everyone else**: under `AUTH_ADMISSION=allowlist` (default) the issuer
+  signs them in and mcp-app answers `403`; under `open` they are admitted
+  and registered on their first request, until `MAX_USERS` records exist.
+  Open admission suits data-owning apps; an API-proxy app's users still
+  need a profile before their first tool call, so until users can supply
+  their own backend credentials, open admission only creates empty records.
+  Recommend `MAX_USERS` whenever admission is open.
 
 Revoking a user (`DELETE /admin/users/{email}`, `users revoke`) deletes
 the record; the next request with their token is a `403`. Re-registering
