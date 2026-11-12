@@ -678,6 +678,13 @@ that have emerged across multiple apps built on this framework:
   A deployment tool's manifest may supply values, but it never
   serves as the record of what a variable is: every variable
   it sets is in the README table first.
+- **A published app also ships `server.json`.** When the app
+  is published to a package index or the MCP Registry, its
+  registry manifest (`server.json`) lists the variables a
+  local stdio launch needs, with the same required, secret and
+  default facts as the README table, and the env-docs test
+  checks the two agree. An app that is not published needs
+  none.
 - **Configure/install/register as three distinct sections.**
   Install = getting the package. Configure = env vars,
   identity provider, profile data. Register = wiring into an
