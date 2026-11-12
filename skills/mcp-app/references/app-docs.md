@@ -537,7 +537,7 @@ reader needs to navigate. Coherent product, not history exposé.
 
 ## Deploy
 
-<env var table — AUTH_ISSUER, ADMIN_EMAILS, APP_USERS_PATH, app-specific>
+<pointer to the Environment variables section for what to set>
 <runtime contract: start command, ports, endpoint paths,
  auth model>
 <Docker example as universal illustration — or, if the repo
@@ -574,8 +574,10 @@ reader needs to navigate. Coherent product, not history exposé.
 
 ## Configuration
 
-<env var reference table>
-<XDG paths this app uses>
+<Environment variables: quick-look table (variable, transport, required,
+ type, default when unset, secret), then a reference entry per variable
+ (format, example, missing, wrong, notes)>
+<files and XDG paths this app uses>
 
 ## Further Reading
 
@@ -651,10 +653,38 @@ that have emerged across multiple apps built on this framework:
 - **One-paragraph opener** that names the backend system
   (for API-proxy) or the data domain (for data-owning) in
   the first sentence. Skip preamble.
-- **Env var table early** — a single table of every env
-  var the app reads, with `Required | If Missing | Purpose`
-  columns. This is where operators land when debugging
-  startup failures.
+- **Environment variables: a table, then a reference.** The
+  README has an "Environment variables" section listing every
+  variable the server reads, the app's own and the framework's.
+  First a quick-look table: variable, transport (HTTP, stdio,
+  both), required, type (URL, enum with its values, integer
+  with its range, list, path, text), default when unset, and
+  whether it is a secret. Then one reference entry per
+  variable: its format and accepted values, an example, what
+  happens when it is missing, what happens when it is wrong,
+  and anything an operator must know (precedence over a file,
+  rotation, when it is read). Say once when variables are read
+  (startup or per request) and which common ones are not read
+  (`PORT`, log level). This is where operators land when
+  debugging startup failures.
+- **Enforce it with a test.** A unit test collects the
+  variable names the code reads (the app's `ENV_*` constants,
+  mcp-app's in `mcp_app.auth` and `mcp_app.usage`, and the
+  literal names mcp-app reads directly: `APP_USERS_PATH`,
+  `REQUIRED_FS_TYPE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`) and
+  fails when one is missing from the table or has no reference
+  entry.
+- **The README documents configuration, nothing else does.**
+  A deployment tool's manifest may supply values, but it never
+  serves as the record of what a variable is: every variable
+  it sets is in the README table first.
+- **A published app also ships `server.json`.** When the app
+  is published to a package index or the MCP Registry, its
+  registry manifest (`server.json`) lists the variables a
+  local stdio launch needs, with the same required, secret and
+  default facts as the README table, and the env-docs test
+  checks the two agree. An app that is not published needs
+  none.
 - **Configure/install/register as three distinct sections.**
   Install = getting the package. Configure = env vars,
   identity provider, profile data. Register = wiring into an

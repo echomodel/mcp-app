@@ -85,6 +85,9 @@ ready to deploy?"
 
 ### Documentation
 - [ ] README.md with quick start, deployment, config
+- [ ] README "Environment variables" section: a quick-look table of every
+      variable read (app and framework) plus a reference entry per variable,
+      with a unit test that fails when one is missing (`app-docs.md`)
 - [ ] CONTRIBUTING.md with architecture and testing standards
 - [ ] CONTRIBUTING.md defines the release process (version from `vX.Y.Z` tags, bump rules, deploy the tag)
 - [ ] CLAUDE.md: `@README.md` and `@CONTRIBUTING.md`
